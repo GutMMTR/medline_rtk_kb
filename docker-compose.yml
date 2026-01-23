@@ -1,0 +1,39 @@
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: medline_rtk_kb_db
+    environment:
+      POSTGRES_DB: app
+      POSTGRES_USER: app
+      POSTGRES_PASSWORD: app
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./data/postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U app -d app"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: medline_rtk_kb_backend
+    environment:
+      DATABASE_URL: postgresql+psycopg://app:app@db:5432/app
+      APP_SECRET_KEY: dev-secret-change-me
+      ADMIN_LOGIN: admin
+      ADMIN_PASSWORD: admin12345
+      ADMIN_FULL_NAME: Default Admin
+      MAX_UPLOAD_MB: "50"
+      SHARE_PATH: /mnt/share
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      # MVP: сюда можно примонтировать SMB шару (read-only) или локальную папку для миграции.
+      - ./data/share:/mnt/share:ro

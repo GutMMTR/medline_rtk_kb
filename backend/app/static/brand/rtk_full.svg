@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="260" height="56" viewBox="0 0 260 56">
+  <defs>
+    <linearGradient id="rtk_p2" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#7B2CFF"/>
+      <stop offset="1" stop-color="#5B2EFF"/>
+    </linearGradient>
+  </defs>
+  <g transform="translate(6,6)">
+    <path d="M30 2C20 8 12 18 8 30l14 14c5-18 14-32 29-40L30 2z" fill="url(#rtk_p2)"/>
+    <path d="M20 38c-2 4-3 8-3 14h22c-6-4-10-8-15-14h-4z" fill="#FF4F12"/>
+    <!-- Placeholder text; replace by official full logo file when you add it -->
+    <text x="64" y="30" font-family="Arial, sans-serif" font-size="22" font-weight="700" fill="#101828">Ростелеком</text>
+  </g>
+</svg>
+

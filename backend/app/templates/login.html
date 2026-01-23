@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{% block content %}
+  <div class="auth-shell">
+    <div class="auth-hero">
+      <div class="auth-hero-badge">
+        <img
+          class="auth-hero-logo-img"
+          src="/static/brand/rtk_mark.png"
+          alt="Ростелеком"
+          onerror="this.onerror=null;this.src='/static/brand/rtk_mark.svg';"
+        />
+      </div>
+      <div>
+        <div class="auth-hero-title">Личный кабинет</div>
+        <div class="auth-hero-subtitle">Хранилище артефактов и файлов для аудиторов и организаций</div>
+      </div>
+    </div>
+
+    <div class="auth-card card">
+      <div class="auth-mark">
+        <img
+          src="/static/brand/rtk_mark.png"
+          alt="Ростелеком"
+          onerror="this.onerror=null;this.src='/static/brand/rtk_mark.svg';"
+        />
+      </div>
+      <div class="auth-card-title">Авторизация</div>
+      <form method="post" action="/login" class="auth-form">
+        <label>Логин</label>
+        <input name="login" autocomplete="username" required />
+        <label>Пароль</label>
+        <input name="password" type="password" autocomplete="current-password" required />
+        {% if error %}
+          <div class="error">{{ error }}</div>
+        {% endif %}
+        <button class="btn btn-accent btn-lg" type="submit">Войти</button>
+      </form>
+    </div>
+  </div>
+{% endblock %}

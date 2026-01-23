@@ -1,0 +1,72 @@
+{% extends "base.html" %}
+{% block content %}
+  <div class="section-header">
+    <div>
+      <h2 style="margin:0">Пользователи</h2>
+      <div class="muted">Создание и редактирование пользователей.</div>
+    </div>
+    <div class="row-right"><a class="btn btn-secondary" href="/admin">Назад</a></div>
+  </div>
+
+  <div class="card">
+    {% if error %}
+      <div class="error">{{ error }}</div>
+    {% endif %}
+    <form method="post" action="/admin/users" class="grid">
+      <div>
+        <label>Логин</label>
+        <input name="login" required />
+      </div>
+      <div>
+        <label>Пароль</label>
+        <input name="password" type="password" minlength="8" required placeholder="Минимум 8 символов, стр/загл, цифра, спецсимвол" />
+        <div class="hint">Требования: 8+ символов, строчные/заглавные, цифра, спецсимвол.</div>
+      </div>
+      <div>
+        <label>ФИО (опц.)</label>
+        <input name="full_name" />
+      </div>
+      <div>
+        <label>Админ</label>
+        <select name="is_admin">
+          <option value="false" selected>нет</option>
+          <option value="true">да</option>
+        </select>
+      </div>
+      <div class="filter-actions" style="grid-column: span 2">
+        <button class="btn" type="submit">Создать</button>
+      </div>
+    </form>
+  </div>
+
+  <div class="card">
+    <div class="section-header">
+      <h3 style="margin:0">Таблица</h3>
+      <div class="muted">Всего: {{ users|length }}</div>
+    </div>
+    <div class="table-wrap">
+    <table class="table">
+      <thead><tr><th>ID</th><th>Логин</th><th>ФИО</th><th>Админ</th><th>Активен</th><th>Создан</th><th class="th-actions"></th></tr></thead>
+      <tbody>
+        {% for u in users %}
+          <tr>
+            <td>{{ u.id }}</td>
+            <td>{{ u.login }}</td>
+            <td>{{ u.full_name }}</td>
+            <td>{{ "да" if u.is_admin else "нет" }}</td>
+            <td>{{ "да" if u.is_active else "нет" }}</td>
+            <td class="mono">{{ u.created_at|dt }}</td>
+            <td class="td-actions">
+              <a class="icon-btn" href="/admin/users/{{ u.id }}/edit" title="Редактировать" aria-label="Редактировать">
+                <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" focusable="false">
+                  <path fill="currentColor" d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zm2.92 2.33H5v-.92l9.06-9.06.92.92L5.92 19.58zM20.71 7.04a1.003 1.003 0 0 0 0-1.42l-2.34-2.34a1.003 1.003 0 0 0-1.42 0l-1.83 1.83 3.75 3.75 1.84-1.82z"/>
+                </svg>
+              </a>
+            </td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    </div>
+  </div>
+{% endblock %}

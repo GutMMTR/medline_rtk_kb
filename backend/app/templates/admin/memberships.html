@@ -1,0 +1,85 @@
+{% extends "base.html" %}
+{% block content %}
+  <div class="section-header">
+    <div>
+      <h2 style="margin:0">Доступы (роли)</h2>
+      <div class="muted">Назначение ролей пользователям в организациях.</div>
+    </div>
+    <div class="row-right"><a class="btn btn-secondary" href="/admin">Назад</a></div>
+  </div>
+
+  <div class="card">
+    {% if error %}
+      <div class="error">{{ error }}</div>
+    {% endif %}
+    <form method="post" action="/admin/memberships" class="grid">
+      <div>
+        <label>Пользователь</label>
+        <select name="user_id">
+          {% for u in users %}
+            <option value="{{ u.id }}">{{ u.login }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div>
+        <label>Организация</label>
+        <select name="org_id">
+          {% for o in orgs %}
+            <option value="{{ o.id }}">{{ o.name }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div>
+        <label>Роль</label>
+        <select name="role">
+          {% for r in roles %}
+            <option value="{{ r }}">{{ role_labels.get(r, r) }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="filter-actions">
+        <button class="btn" type="submit">Назначить/обновить</button>
+      </div>
+    </form>
+  </div>
+
+  <div class="card">
+    <div class="section-header">
+      <h3 style="margin:0">Таблица</h3>
+      <div class="muted">Всего: {{ memberships|length }}</div>
+    </div>
+    <div class="table-wrap">
+    <table class="table">
+      <thead><tr><th>ID</th><th>Пользователь</th><th>Организация</th><th>Роль</th><th>Создан</th><th class="th-actions-wide"></th></tr></thead>
+      <tbody>
+        {% for m in memberships %}
+          <tr>
+            <td>{{ m.id }}</td>
+            <td>{{ m.user.login if m.user else m.user_id }}</td>
+            <td>{{ m.org.name if m.org else m.org_id }}</td>
+            <td>{{ role_labels.get(m.role.value if m.role else '', m.role.value if m.role else '') }}</td>
+            <td class="mono">{{ m.created_at|dt }}</td>
+            <td class="td-actions-wide">
+              <form method="post" action="/admin/memberships" class="row-right" style="justify-content:flex-end; gap:8px;">
+                <input type="hidden" name="user_id" value="{{ m.user_id }}" />
+                <input type="hidden" name="org_id" value="{{ m.org_id }}" />
+                <select name="role" style="width: 170px;">
+                  {% for r in roles %}
+                    <option value="{{ r }}" {% if m.role and m.role.value == r %}selected{% endif %}>{{ role_labels.get(r, r) }}</option>
+                  {% endfor %}
+                </select>
+                <button class="icon-btn" type="submit" title="Сохранить" aria-label="Сохранить">
+                  <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" focusable="false">
+                    <path fill="currentColor" d="M17 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V7l-4-4zM6 8V5h9v3H6z"/>
+                    <path fill="currentColor" d="M16 9v6h2l-3 3-3-3h2V9h2z"/>
+                  </svg>
+                </button>
+              </form>
+            </td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    </div>
+  </div>
+{% endblock %}

@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block content %}
+  <div class="section-header">
+    <div>
+      <h2 style="margin:0">Организация</h2>
+      <div class="muted">Редактирование организации.</div>
+    </div>
+    <div class="row-right">
+      <a class="btn btn-secondary" href="/admin/orgs">Назад</a>
+    </div>
+  </div>
+
+  <div class="card">
+    {% if error %}
+      <div class="error">{{ error }}</div>
+    {% endif %}
+    <form method="post" action="/admin/orgs/{{ org.id }}/edit" class="grid">
+      <div style="grid-column: span 2">
+        <label>Имя</label>
+        <input name="name" value="{{ org.name }}" required />
+      </div>
+      <div class="filter-actions" style="grid-column: span 2">
+        <button class="btn" type="submit">Сохранить</button>
+      </div>
+    </form>
+  </div>
+{% endblock %}
+

@@ -1,0 +1,54 @@
+{% extends "base.html" %}
+{% block content %}
+  <div class="row">
+    <div>
+      <h2>Редактирование артефакта</h2>
+      <div class="muted mono">{{ a.artifact_key }}</div>
+    </div>
+    <div class="row-right">
+      <a class="btn btn-secondary" href="/artifacts">Назад к справочнику</a>
+    </div>
+  </div>
+
+  <div class="card">
+    <form method="post" action="/artifacts/{{ a.id }}/edit">
+      <div class="grid">
+        <div>
+          <label>Тематика</label>
+          <input name="topic" value="{{ a.topic or '' }}" />
+        </div>
+        <div>
+          <label>Домен</label>
+          <input name="domain" value="{{ a.domain or '' }}" />
+        </div>
+        <div>
+          <label>Уровень КБ</label>
+          <input name="kb_level" value="{{ a.kb_level or '' }}" />
+        </div>
+        <div>
+          <label>Сокращенное наименование</label>
+          <input value="{{ a.short_name or '' }}" disabled />
+          <div class="hint">Для MVP сокращение не редактируем (чтобы не ломать ключи/импорт).</div>
+        </div>
+      </div>
+
+      <label>Показатель</label>
+      <input name="indicator_name" value="{{ a.indicator_name or '' }}" />
+
+      <label>Артефакт (заголовок строки)</label>
+      <input name="title" value="{{ a.title or '' }}" />
+
+      <label>Артефакты достижения (общий текст)</label>
+      <textarea name="achievement_text" rows="5">{{ a.achievement_text or '' }}</textarea>
+
+      <label>Артефакт достижения (пункт)</label>
+      <textarea name="achievement_item_text" rows="5">{{ a.achievement_item_text or '' }}</textarea>
+
+      <div class="row" style="align-items:center; margin-top: 12px;">
+        <button class="btn" type="submit">Сохранить</button>
+        <div class="muted">Пункт: {% if a.achievement_item_no %}<span class="mono">{{ a.achievement_item_no }}</span>{% else %}—{% endif %}</div>
+      </div>
+    </form>
+  </div>
+{% endblock %}
+

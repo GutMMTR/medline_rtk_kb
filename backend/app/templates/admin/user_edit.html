@@ -1,0 +1,54 @@
+{% extends "base.html" %}
+{% block content %}
+  <div class="section-header">
+    <div>
+      <h2 style="margin:0">Пользователь: {{ u.login }}</h2>
+      <div class="muted">Редактирование пользователя и смена пароля.</div>
+    </div>
+    <div class="row-right">
+      <a class="btn btn-secondary" href="/admin/users">Назад</a>
+    </div>
+  </div>
+
+  <div class="card">
+    {% if error %}
+      <div class="error">{{ error }}</div>
+    {% endif %}
+    <form method="post" action="/admin/users/{{ u.id }}/edit" class="grid">
+      <div>
+        <label>Логин</label>
+        <input value="{{ u.login }}" disabled />
+      </div>
+      <div>
+        <label>ФИО</label>
+        <input name="full_name" value="{{ u.full_name or '' }}" />
+      </div>
+
+      <div>
+        <label>Активен</label>
+        <select name="is_active">
+          <option value="true" {% if u.is_active %}selected{% endif %}>да</option>
+          <option value="false" {% if not u.is_active %}selected{% endif %}>нет</option>
+        </select>
+      </div>
+      <div>
+        <label>Админ</label>
+        <select name="is_admin">
+          <option value="true" {% if u.is_admin %}selected{% endif %}>да</option>
+          <option value="false" {% if not u.is_admin %}selected{% endif %}>нет</option>
+        </select>
+      </div>
+
+      <div style="grid-column: span 2">
+        <label>Новый пароль (опционально)</label>
+        <input name="new_password" type="password" minlength="8" placeholder="Минимум 8 символов, стр/загл, цифра, спецсимвол" />
+        <div class="hint">Оставьте пустым, если пароль менять не нужно.</div>
+      </div>
+
+      <div class="filter-actions" style="grid-column: span 2">
+        <button class="btn" type="submit">Сохранить</button>
+      </div>
+    </form>
+  </div>
+{% endblock %}
+

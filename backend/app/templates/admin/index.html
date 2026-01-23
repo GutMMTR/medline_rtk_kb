@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% block content %}
+  <h2>Админка</h2>
+  <div class="card">
+    <div class="grid">
+      <a class="btn btn-secondary" href="/admin/orgs">Организации</a>
+      <a class="btn btn-secondary" href="/admin/users">Пользователи</a>
+      <a class="btn btn-secondary" href="/admin/memberships">Доступы (роли)</a>
+      <a class="btn btn-secondary" href="/admin/artifacts">Импорт артефактов (Excel)</a>
+      <a class="btn btn-secondary" href="/artifacts">Справочник артефактов</a>
+      <a class="btn btn-secondary" href="/auditor/files">К файлам</a>
+    </div>
+  </div>
+{% endblock %}

@@ -1,0 +1,128 @@
+{% extends "base.html" %}
+{% block content %}
+  <div class="row">
+    <div>
+      <h2>Файлы организации: {{ org_name }}</h2>
+      <div class="muted">Навигация по папкам строится из “Сокращенного” (например: ВССТ.КМНК.1 → ВССТ/КМНК/1).</div>
+    </div>
+    <div class="row-right">
+      <a class="btn btn-secondary" href="/my/artifacts">К артефактам</a>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="breadcrumb">
+      <a class="breadcrumb-link" href="/my/files">Корень</a>
+      {% for c in crumbs %}
+        <span class="muted">/</span>
+        <a class="breadcrumb-link" href="/my/files?path={{ c.path }}">{{ c.name }}</a>
+      {% endfor %}
+    </div>
+  </div>
+
+  {% if folders|length > 0 %}
+    <div class="card">
+      <h3>Папки</h3>
+      <div class="folder-grid">
+        {% for name, cnt in folders %}
+          <a class="folder-card" href="/my/files?path={{ (path ~ '/' if path else '') ~ name }}">
+            <div class="folder-icon">📁</div>
+            <div class="folder-name mono">{{ name }}</div>
+            <div class="muted">элементов: {{ cnt }}</div>
+          </a>
+        {% endfor %}
+      </div>
+    </div>
+  {% endif %}
+
+  {% if leaf_items|length > 0 %}
+    <div class="card">
+      <div class="section-header">
+        <h3>Файлы / требования</h3>
+        <div class="muted">Показываем текущий файл артефакта (если загружен) + метаданные.</div>
+      </div>
+      <div class="table-wrap">
+        <table class="table">
+          <thead>
+            <tr>
+              <th>Сокращенное</th>
+              <th>Пункт</th>
+              <th>Артефакт</th>
+              <th class="col-status">Статус</th>
+              <th>Файл</th>
+              <th>Дата загрузки</th>
+              <th>Кто загрузил</th>
+              <th>Дата обновления</th>
+              <th>Кто обновил</th>
+              <th>Загрузить</th>
+              <th class="th-actions-wide"></th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for r in leaf_items %}
+              <tr>
+                <td class="mono">{{ r.a.short_name }}</td>
+                <td class="mono">{% if r.a.achievement_item_no %}{{ r.a.achievement_item_no }}{% else %}—{% endif %}</td>
+                <td style="min-width:260px">{{ r.a.title }}</td>
+                <td class="col-status">
+                  {% if r.oa.status.value == "uploaded" %}
+                    <span class="badge">Загружен</span>
+                  {% else %}
+                    <span class="badge badge-danger">Не загружен</span>
+                  {% endif %}
+                </td>
+                <td class="mono">
+                  {% if r.fv %}
+                    v{{ r.fv.version_no }} · {{ r.fv.original_filename }}
+                  {% else %}
+                    —
+                  {% endif %}
+                </td>
+                <td class="mono">{% if r.fv %}{{ r.fv.created_at|dt }}{% else %}—{% endif %}</td>
+                <td class="mono">{% if r.uploaded_by %}{{ r.uploaded_by }}{% else %}—{% endif %}</td>
+                <td class="mono">{% if r.oa.updated_at %}{{ r.oa.updated_at|dt }}{% else %}—{% endif %}</td>
+                <td class="mono">{% if r.updated_by %}{{ r.updated_by }}{% else %}—{% endif %}</td>
+                <td>
+                  <form method="post" action="/my/artifacts/{{ r.oa.id }}/upload" enctype="multipart/form-data">
+                    <div class="upload-row">
+                      <input class="file-input" name="upload" type="file" required />
+                      <button class="btn" type="submit">Загрузить</button>
+                    </div>
+                    <div class="hint">лимит {{ max_upload_mb }} МБ</div>
+                  </form>
+                </td>
+                <td class="td-actions-wide">
+                  {% if r.oa.status.value == "uploaded" %}
+                    <div class="row-right">
+                      <a class="icon-btn" href="/my/artifacts/{{ r.oa.id }}/download" title="Скачать" aria-label="Скачать">
+                        <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" focusable="false">
+                          <path fill="currentColor" d="M5 20h14v-2H5v2zm7-18-5.5 5.5 1.42 1.42L11 6.84V16h2V6.84l3.08 3.08 1.42-1.42L12 2z"/>
+                        </svg>
+                      </a>
+                      <form method="post" action="/my/artifacts/{{ r.oa.id }}/delete" onsubmit="return confirm('Удалить файл из артефакта? Статус станет \"Не загружен\". История версий сохранится.');" style="display:inline">
+                        <button class="icon-btn icon-danger" type="submit" title="Удалить" aria-label="Удалить">
+                          <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" focusable="false">
+                            <path fill="currentColor" d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/>
+                          </svg>
+                        </button>
+                      </form>
+                    </div>
+                  {% else %}
+                    <span class="muted">—</span>
+                  {% endif %}
+                </td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  {% endif %}
+
+  {% if folders|length == 0 and leaf_items|length == 0 %}
+    <div class="card">
+      <div class="muted">Нет данных. Попросите администратора импортировать справочник артефактов.</div>
+    </div>
+  {% endif %}
+{% endblock %}
+

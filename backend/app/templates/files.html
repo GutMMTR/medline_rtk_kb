@@ -1,0 +1,67 @@
+{% extends "base.html" %}
+{% block content %}
+  <div class="row">
+    <div>
+      <h2>Файлы</h2>
+      <div class="muted">MVP: файлы по организациям (позже добавим артефакты/нейминги из Excel).</div>
+    </div>
+    {% if user.is_admin %}
+      <div class="row-right"><a class="btn btn-secondary" href="/admin">Админка</a></div>
+    {% endif %}
+  </div>
+
+  <div class="card">
+    <form method="get" action="/">
+      <label>Организация</label>
+      <select name="org_id" onchange="this.form.submit()">
+        {% for o in orgs %}
+          <option value="{{ o.id }}" {% if o.id == selected_org_id %}selected{% endif %}>{{ o.name }}</option>
+        {% endfor %}
+      </select>
+      <noscript><button class="btn btn-secondary" type="submit">Ок</button></noscript>
+    </form>
+  </div>
+
+  <div class="card">
+    <h3>Загрузка</h3>
+    <form method="post" action="/files/upload" enctype="multipart/form-data">
+      <input type="hidden" name="org_id" value="{{ selected_org_id }}" />
+      <label>Комментарий (опционально)</label>
+      <input name="note" />
+      <label>Файл (лимит {{ max_upload_mb }} МБ)</label>
+      <input name="upload" type="file" required />
+      <button class="btn" type="submit">Загрузить</button>
+    </form>
+  </div>
+
+  <div class="card">
+    <h3>Таблица</h3>
+    <table>
+      <thead>
+        <tr>
+          <th>ID</th>
+          <th>Имя файла</th>
+          <th>Размер</th>
+          <th>SHA256</th>
+          <th>Создан</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for f in files %}
+          <tr>
+            <td>{{ f.id }}</td>
+            <td title="{{ f.note }}">{{ f.original_filename }}</td>
+            <td class="mono">{{ f.size_bytes }}</td>
+            <td class="mono">{{ f.sha256[:12] }}…</td>
+            <td class="mono">{{ f.created_at|dt }}</td>
+            <td><a class="btn btn-secondary" href="/files/{{ f.id }}/download">Скачать</a></td>
+          </tr>
+        {% endfor %}
+        {% if files|length == 0 %}
+          <tr><td colspan="6" class="muted">Пока нет файлов.</td></tr>
+        {% endif %}
+      </tbody>
+    </table>
+  </div>
+{% endblock %}

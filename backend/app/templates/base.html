@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{{ title or "Медлайн.РТК.КБ" }}</title>
+    <link rel="stylesheet" href="/static/app.css?v=20" />
+    <link rel="icon" href="/static/brand/rtk_mark.svg" type="image/svg+xml" />
+  </head>
+  <body>
+    <div class="topbar">
+      <a class="brand" href="/">
+        <img
+          class="brand-logo"
+          src="/static/brand/rtk_full.png"
+          alt="Ростелеком"
+          onerror="this.onerror=null;this.src='/static/brand/rtk_full.svg';"
+        />
+      </a>
+      {% if user %}
+      <div class="topbar-right">
+        <span class="muted">Пользователь:</span> {{ user.login }}
+        {% if user.is_admin %}
+          <span class="badge">admin</span>
+        {% endif %}
+        <form method="post" action="/logout" style="display:inline">
+          <button class="btn btn-secondary" type="submit">Выйти</button>
+        </form>
+      </div>
+      {% endif %}
+    </div>
+    <div class="{{ container_class or 'container' }}">
+      {% block content %}{% endblock %}
+    </div>
+  </body>
+</html>

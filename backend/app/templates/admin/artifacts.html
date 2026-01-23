@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+{% block content %}
+  <h2>Импорт артефактов (Excel, лист «Программа»)</h2>
+
+  <div class="card">
+    <p class="muted">
+      Загрузите .xlsx. Если в «Артефакты достижения» есть пункты <code>1.</code>/<code>2.</code> — создадим под‑артефакты (по одному на пункт).
+    </p>
+
+    <form method="post" action="/admin/artifacts/import" enctype="multipart/form-data" class="grid" style="margin-top:12px">
+      <input type="file" name="upload" accept=".xlsx" required />
+      <button class="btn btn-primary" type="submit">Загрузить и импортировать</button>
+    </form>
+  </div>
+
+  {% if error %}
+    <div class="card" style="margin-top:16px">
+      <h3 style="margin-top:0">Ошибка импорта</h3>
+      <div style="color:#b91c1c">{{ error }}</div>
+      <div class="muted" style="margin-top:8px">
+        Проверьте, что загружен правильный лист «Программа» и в файле есть колонки: Тематика, Домен, Сокращенное наименование, Артефакты достижения.
+      </div>
+    </div>
+  {% endif %}
+
+  {% if result %}
+    <div class="card" style="margin-top:16px">
+      <h3 style="margin-top:0">Результат импорта</h3>
+      <div class="muted">sha256: <code>{{ result.sha256 }}</code></div>
+      <div style="margin-top:8px">
+        <span class="badge">created: {{ result.created }}</span>
+        <span class="badge">updated: {{ result.updated }}</span>
+      </div>
+      <div style="margin-top:12px">
+        <a class="btn btn-secondary" href="/spa">Открыть SPA и загрузить файлы</a>
+      </div>
+    </div>
+  {% endif %}
+
+{% endblock %}
+

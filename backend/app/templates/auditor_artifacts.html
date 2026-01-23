@@ -1,0 +1,205 @@
+{% extends "base.html" %}
+{% block content %}
+  <div class="section-header">
+    <div>
+      <h2 style="margin:0">Аудит</h2>
+      <div class="muted">
+        Заполнено: <b>{{ completion_uploaded }}</b> из <b>{{ completion_total }}</b> ({{ completion_pct }}%) · осталось {{ completion_total - completion_uploaded }}
+      </div>
+    </div>
+    <div class="row-right">
+      <form method="get" action="/auditor/artifacts" class="header-inline-form">
+        <input type="hidden" name="topic" value="{{ topic or '' }}" />
+        <input type="hidden" name="domain" value="{{ domain or '' }}" />
+        <input type="hidden" name="kb_level" value="{{ kb_level or '' }}" />
+        <input type="hidden" name="short_name" value="{{ short_name or '' }}" />
+        <input type="hidden" name="q" value="{{ q or '' }}" />
+        <input type="hidden" name="status" value="{{ status or '' }}" />
+        <input type="hidden" name="page_size" value="{{ page_size }}" />
+        <label style="margin:0">Организация</label>
+        <select name="org_id" onchange="this.form.submit()">
+          {% for o in orgs %}
+            <option value="{{ o.id }}" {% if o.id == selected_org_id %}selected{% endif %}>{{ o.name }}</option>
+          {% endfor %}
+        </select>
+      </form>
+      <a class="btn btn-secondary" href="/auditor/artifacts/export.xlsx?{{ export_query }}">Выгрузить Excel</a>
+      <a class="btn btn-secondary" href="/auditor/files?org_id={{ selected_org_id }}">Файлы</a>
+      <a class="btn btn-secondary" href="/artifacts">Справочник</a>
+    </div>
+  </div>
+
+  <div class="card">
+    <form method="get" action="/auditor/artifacts" class="grid filter-form filter-form--status">
+      <input type="hidden" name="org_id" value="{{ selected_org_id }}" />
+      <input type="hidden" name="page_size" value="{{ page_size }}" />
+      <div class="filter-q">
+        <label>Поиск (показатель/артефакт)</label>
+        <input name="q" value="{{ q or '' }}" placeholder="например: лицензии / конфигурации" />
+      </div>
+      <div class="filter-topic">
+        <label>Тематика</label>
+        <select name="topic">
+          <option value="">(все)</option>
+          {% for t in topics %}
+            <option value="{{ t }}" {% if t == topic %}selected{% endif %}>{{ t }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="filter-domain">
+        <label>Домен</label>
+        <select name="domain">
+          <option value="">(все)</option>
+          {% for d in domains %}
+            <option value="{{ d }}" {% if d == domain %}selected{% endif %}>{{ d }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="filter-kb">
+        <label>Уровень КБ</label>
+        <select name="kb_level">
+          <option value="">(все)</option>
+          {% for k in kb_levels %}
+            <option value="{{ k }}" {% if k == kb_level %}selected{% endif %}>{{ k }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="filter-status">
+        <label>Статус</label>
+        <select name="status">
+          <option value="" {% if not status %}selected{% endif %}>(все)</option>
+          <option value="missing" {% if status == "missing" %}selected{% endif %}>Не загружен</option>
+          <option value="uploaded" {% if status == "uploaded" %}selected{% endif %}>Загружен</option>
+        </select>
+      </div>
+      <div class="filter-short">
+        <label>Сокращенное наименование (точно)</label>
+        <input name="short_name" value="{{ short_name or '' }}" placeholder="например: СЗИ.2FA.1" />
+      </div>
+      <div class="filter-actions">
+        <button class="btn" type="submit">Применить</button>
+      </div>
+    </form>
+  </div>
+
+  <div class="card">
+    <div class="section-header">
+      <h3>Таблица</h3>
+      <div class="muted">Показано {{ rows|length }} из {{ total }} · страница {{ page }} из {{ total_pages }}</div>
+      <div class="row-right"></div>
+    </div>
+
+    <div class="table-wrap">
+      <table class="table">
+        <thead>
+          <tr>
+            <th>Тематика</th>
+            <th>Домен</th>
+            <th>Сокращенное</th>
+            <th>Пункт</th>
+            <th>Артефакт</th>
+            <th class="col-status">Статус</th>
+            <th>Файл</th>
+            <th>Дата загрузки</th>
+            <th>Кто загрузил</th>
+            <th>Дата изменения</th>
+            <th>Кто изменил</th>
+            <th style="min-width:300px">Комментарий</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for r in rows %}
+            <tr>
+              <td>{{ r.a.topic }}</td>
+              <td>{{ r.a.domain }}</td>
+              <td class="mono">{{ r.a.short_name }}</td>
+              <td class="mono">{% if r.a.achievement_item_no %}{{ r.a.achievement_item_no }}{% else %}—{% endif %}</td>
+              <td style="min-width:260px">{{ r.a.title }}</td>
+              <td class="col-status">
+                {% if r.oa.status.value == "uploaded" %}
+                  <span class="badge">Загружен</span>
+                {% else %}
+                  <span class="badge badge-danger">Не загружен</span>
+                {% endif %}
+              </td>
+              <td class="mono">{% if r.fv %}{{ r.fv.original_filename }}{% else %}—{% endif %}</td>
+              <td class="mono">{% if r.fv %}{{ r.fv.created_at|dt }}{% else %}—{% endif %}</td>
+              <td class="mono">{% if r.uploaded_by %}{{ r.uploaded_by }}{% else %}—{% endif %}</td>
+              <td class="mono">{% if r.oa.updated_at %}{{ r.oa.updated_at|dt }}{% else %}—{% endif %}</td>
+              <td class="mono">{% if r.updated_by %}{{ r.updated_by }}{% else %}—{% endif %}</td>
+              <td>
+                {% if r.comment_text %}
+                  <div class="muted" style="margin-bottom:6px">Последний: <span class="mono">{{ r.comment_by }}</span> · <span class="mono">{{ r.comment_at|dt }}</span></div>
+                  <div style="margin-bottom:8px">{{ r.comment_text }}</div>
+                {% endif %}
+                <form method="post" action="/auditor/org_artifacts/{{ r.oa.id }}/comment">
+                  <input type="hidden" name="org_id" value="{{ selected_org_id }}" />
+                  <textarea name="comment" rows="2" placeholder="Комментарий аудитора..."></textarea>
+                  <div class="row-right" style="justify-content:flex-end; margin-top:6px;">
+                    <button class="icon-btn" type="submit" title="Сохранить" aria-label="Сохранить">
+                      <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" focusable="false">
+                        <!-- floppy + download arrow -->
+                        <path fill="currentColor" d="M17 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V7l-4-4zM6 8V5h9v3H6z"/>
+                        <path fill="currentColor" d="M8 21h4.2a4.9 4.9 0 0 1-.2-1.5 5 5 0 0 1 .1-1H8v2z"/>
+                        <path fill="currentColor" d="M16 9v6h2l-3 3-3-3h2V9h2z"/>
+                      </svg>
+                    </button>
+                  </div>
+                </form>
+              </td>
+            </tr>
+          {% endfor %}
+          {% if rows|length == 0 %}
+            <tr><td colspan="12" class="muted">Нет данных.</td></tr>
+          {% endif %}
+        </tbody>
+      </table>
+    </div>
+
+    {% if total_pages > 1 %}
+      <div class="pagination">
+        <div class="muted">Страница {{ page }} из {{ total_pages }}</div>
+        <div class="pagination-links">
+          {% if has_prev %}
+            <a class="btn btn-secondary" href="/auditor/artifacts?{{ base_query }}&page=1">⟪</a>
+            <a class="btn btn-secondary" href="/auditor/artifacts?{{ base_query }}&page={{ page - 1 }}">←</a>
+          {% endif %}
+
+          {% if page_links[0] > 1 %}
+            <span class="muted">…</span>
+          {% endif %}
+          {% for p in page_links %}
+            {% if p == page %}
+              <span class="page-chip page-chip-active">{{ p }}</span>
+            {% else %}
+              <a class="page-chip" href="/auditor/artifacts?{{ base_query }}&page={{ p }}">{{ p }}</a>
+            {% endif %}
+          {% endfor %}
+          {% if page_links[-1] < total_pages %}
+            <span class="muted">…</span>
+          {% endif %}
+
+          {% if has_next %}
+            <a class="btn btn-secondary" href="/auditor/artifacts?{{ base_query }}&page={{ page + 1 }}">→</a>
+            <a class="btn btn-secondary" href="/auditor/artifacts?{{ base_query }}&page={{ total_pages }}">⟫</a>
+          {% endif %}
+        </div>
+
+        <form class="pagination-jump" method="get" action="/auditor/artifacts">
+          <input type="hidden" name="org_id" value="{{ selected_org_id }}" />
+          <input type="hidden" name="topic" value="{{ topic or '' }}" />
+          <input type="hidden" name="domain" value="{{ domain or '' }}" />
+          <input type="hidden" name="kb_level" value="{{ kb_level or '' }}" />
+          <input type="hidden" name="short_name" value="{{ short_name or '' }}" />
+          <input type="hidden" name="q" value="{{ q or '' }}" />
+          <input type="hidden" name="status" value="{{ status or '' }}" />
+          <input type="hidden" name="page_size" value="{{ page_size }}" />
+          <label style="margin:0">Перейти</label>
+          <input name="page" type="number" min="1" max="{{ total_pages }}" value="{{ page }}" style="width: 110px" />
+          <button class="btn btn-secondary" type="submit">Ок</button>
+        </form>
+      </div>
+    {% endif %}
+  </div>
+{% endblock %}
+
