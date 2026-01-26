@@ -28,6 +28,12 @@ class Organization(Base):
     name: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)
 
+    # Кто/как создал организацию (для UI-диагностики: вручную админом или через синхронизацию).
+    created_by_user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    created_via: Mapped[str] = mapped_column(String(32), nullable=False, default="manual")  # manual|nextcloud|system
+
+    created_by: Mapped["User | None"] = relationship(foreign_keys=[created_by_user_id])
+
 
 class User(Base):
     __tablename__ = "users"
@@ -40,7 +46,12 @@ class User(Base):
     is_admin: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)
 
-    memberships: Mapped[list["UserOrgMembership"]] = relationship(back_populates="user")
+    # При удалении пользователя должны удаляться и его membership'ы (иначе ORM пытается проставить NULL в user_id).
+    memberships: Mapped[list["UserOrgMembership"]] = relationship(
+        back_populates="user",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
 
 
 class UserOrgMembership(Base):
@@ -210,3 +221,42 @@ class StoredFile(Base):
     created_by_user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
 
     note: Mapped[str] = mapped_column(Text, nullable=False, default="")
+
+
+class NextcloudIntegrationSettings(Base):
+    __tablename__ = "nextcloud_integration_settings"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    is_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+
+    base_url: Mapped[str] = mapped_column(String(1024), nullable=False, default="")  # e.g. https://nextcloud.soc.rt.ru
+    username: Mapped[str] = mapped_column(String(255), nullable=False, default="")
+    password: Mapped[str] = mapped_column(String(255), nullable=False, default="")  # MVP: хранение в БД (лучше app-password)
+
+    root_folder: Mapped[str] = mapped_column(String(1024), nullable=False, default="")  # relative in WebDAV, e.g. "" or "Artifacts"
+    create_orgs: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+
+    last_sync_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_error: Mapped[str] = mapped_column(Text, nullable=False, default="")
+
+
+class NextcloudRemoteFileState(Base):
+    __tablename__ = "nextcloud_remote_file_state"
+    __table_args__ = (
+        UniqueConstraint("org_id", "remote_path", name="uq_nextcloud_org_remote_path"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    org_id: Mapped[int] = mapped_column(ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True)
+    org_artifact_id: Mapped[int] = mapped_column(ForeignKey("org_artifacts.id", ondelete="CASCADE"), nullable=False, index=True)
+
+    remote_path: Mapped[str] = mapped_column(String(2048), nullable=False)
+    etag: Mapped[str] = mapped_column(String(255), nullable=False, default="")
+    size_bytes: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+    imported_file_version_id: Mapped[int | None] = mapped_column(ForeignKey("file_versions.id", ondelete="SET NULL"), nullable=True)
+    imported_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    org: Mapped[Organization] = relationship()
+    org_artifact: Mapped[OrgArtifact] = relationship()
+    imported_file_version: Mapped[FileVersion | None] = relationship()

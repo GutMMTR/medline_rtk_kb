@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import hashlib
 import io
+import os
 from datetime import datetime, timezone
 from typing import Dict, Tuple
 from urllib.parse import quote, urlencode
+from datetime import timedelta
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile, status
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
@@ -22,6 +24,8 @@ from app.db.models import (
     Artifact,
     ArtifactNode,
     FileVersion,
+    NextcloudIntegrationSettings,
+    NextcloudRemoteFileState,
     OrgArtifact,
     OrgArtifactComment,
     OrgArtifactStatus,
@@ -33,6 +37,12 @@ from app.db.models import (
 )
 from app.db.session import get_db
 from app.importers.program_excel import parse_program_xlsx
+from app.index_kb.excel_fill import fill_workbook_for_org
+from app.index_kb.formula_eval import build_evaluator_from_openpyxl_workbook
+from app.index_kb.sheet_render import iter_render_rows
+from app.index_kb.template_loader import get_index_kb_template
+from app.integrations.nextcloud_dav import NextcloudDavClient, build_webdav_base_url
+from app.integrations.nextcloud_sync import sync_from_nextcloud
 
 
 router = APIRouter()
@@ -40,14 +50,19 @@ templates = Jinja2Templates(directory="app/templates")
 
 
 def _fmt_dt(value: object) -> str:
-    """Форматируем datetime для UI: 'YYYY-MM-DD HH:MM:SS' (без микросекунд и tz)."""
+    """
+    Форматируем datetime для UI: делаем стабильный UTC+3 (MSK), т.к. в контейнере/браузере
+    на практике бывают проблемы с tzdata/кешем. Для MVP считаем, что все даты в БД в UTC.
+    """
     if value is None:
         return ""
     if isinstance(value, datetime):
         dt = value
-        if dt.tzinfo is not None:
-            dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
-        dt = dt.replace(microsecond=0)
+        # Treat naive as UTC
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        dt = dt.astimezone(timezone.utc).replace(microsecond=0, tzinfo=None)
+        dt = dt + timedelta(hours=3)  # MSK
         return dt.strftime("%Y-%m-%d %H:%M:%S")
     return str(value)
 
@@ -77,7 +92,7 @@ def _redirect(url: str) -> RedirectResponse:
 
 @router.get("/login", response_class=HTMLResponse)
 def login_page(request: Request) -> HTMLResponse:
-    resp = templates.TemplateResponse("login.html", {"request": request, "error": None})
+    resp = templates.TemplateResponse("login.html", {"request": request, "error": None, "container_class": "container-wide"})
     # Важно: страница логина часто кешируется браузером (особенно при back/forward).
     resp.headers["Cache-Control"] = "no-store, max-age=0"
     return resp
@@ -91,10 +106,19 @@ def login_action(
     db: Session = Depends(get_db),
 ) -> Response:
     user = db.query(User).filter(User.login == login).one_or_none()
-    if not user or not user.is_active or not verify_password(password, user.password_hash):
+    if user and not user.is_active:
         resp = templates.TemplateResponse(
             "login.html",
-            {"request": request, "error": "Неверный логин или пароль"},
+            {"request": request, "error": "Пользователь заблокирован", "container_class": "container-wide"},
+            status_code=403,
+        )
+        resp.headers["Cache-Control"] = "no-store, max-age=0"
+        return resp
+
+    if not user or not verify_password(password, user.password_hash):
+        resp = templates.TemplateResponse(
+            "login.html",
+            {"request": request, "error": "Неверный логин или пароль", "container_class": "container-wide"},
             status_code=400,
         )
         resp.headers["Cache-Control"] = "no-store, max-age=0"
@@ -306,10 +330,29 @@ def my_artifacts_page(
         list_count_q = list_count_q.filter(OrgArtifact.status == OrgArtifactStatus(status_filter))
     total = list_count_q.count()
 
+    CommentBy = aliased(User)
+    # latest comment per org_artifact (auditor comment visible to customer)
+    sub = (
+        db.query(
+            OrgArtifactComment.org_artifact_id.label("oa_id"),
+            func.max(OrgArtifactComment.created_at).label("max_created_at"),
+        )
+        .filter(OrgArtifactComment.org_id == selected_org_id)
+        .group_by(OrgArtifactComment.org_artifact_id)
+        .subquery()
+    )
+    latest_comment = (
+        db.query(OrgArtifactComment)
+        .join(sub, and_(OrgArtifactComment.org_artifact_id == sub.c.oa_id, OrgArtifactComment.created_at == sub.c.max_created_at))
+        .subquery()
+    )
+
     query = (
-        db.query(OrgArtifact, Artifact, FileVersion)
+        db.query(OrgArtifact, Artifact, FileVersion, latest_comment.c.comment_text, latest_comment.c.created_at, CommentBy)
         .join(Artifact, Artifact.id == OrgArtifact.artifact_id)
         .outerjoin(FileVersion, FileVersion.id == OrgArtifact.current_file_version_id)
+        .outerjoin(latest_comment, latest_comment.c.org_artifact_id == OrgArtifact.id)
+        .outerjoin(CommentBy, CommentBy.id == latest_comment.c.author_user_id)
         .filter(*filters)
         .order_by(Artifact.topic.asc(), Artifact.domain.asc(), Artifact.short_name.asc(), Artifact.achievement_item_no.asc().nullsfirst())
     )
@@ -317,7 +360,18 @@ def my_artifacts_page(
         query = query.filter(OrgArtifact.status == OrgArtifactStatus(status_filter))
 
     offset = (page - 1) * page_size
-    rows = [{"oa": oa, "a": a, "fv": fv} for (oa, a, fv) in query.offset(offset).limit(page_size).all()]
+    rows = []
+    for (oa, a, fv, c_text, c_at, c_by) in query.offset(offset).limit(page_size).all():
+        rows.append(
+            {
+                "oa": oa,
+                "a": a,
+                "fv": fv,
+                "comment_text": c_text or "",
+                "comment_at": c_at,
+                "comment_by": c_by.login if c_by else "",
+            }
+        )
 
     topics = [t for (t,) in db.query(Artifact.topic).filter(Artifact.topic != "").distinct().order_by(Artifact.topic.asc()).all()]
     domains = [d for (d,) in db.query(Artifact.domain).filter(Artifact.domain != "").distinct().order_by(Artifact.domain.asc()).all()]
@@ -535,6 +589,8 @@ def auditor_artifacts_page(
     role = get_user_role_for_org(db, user, selected_org_id)
     if role not in (Role.auditor, Role.admin):
         raise HTTPException(status_code=403, detail="Требуются права auditor/admin")
+    can_delete_files = role == Role.admin
+    current_url = request.url.path + (f"?{request.url.query}" if request.url.query else "")
 
     page = max(int(page or 1), 1)
     page_size = int(page_size or 50)
@@ -669,6 +725,8 @@ def auditor_artifacts_page(
             "container_class": "container-wide",
             "orgs": orgs,
             "selected_org_id": selected_org_id,
+            "can_delete_files": can_delete_files,
+            "current_url": current_url,
             "rows": rows,
             "topic": topic,
             "domain": domain,
@@ -930,6 +988,9 @@ def auditor_files_explorer(
 
     selected_org_id = org_id or orgs[0].id
     _require_auditor_or_admin_for_org(db, user, selected_org_id)
+    role = get_user_role_for_org(db, user, selected_org_id)
+    can_delete_files = role == Role.admin
+    current_url = request.url.path + (f"?{request.url.query}" if request.url.query else "")
 
     _ensure_org_artifacts_materialized(db, selected_org_id)
     db.commit()
@@ -988,10 +1049,130 @@ def auditor_files_explorer(
             "container_class": "container-wide",
             "orgs": orgs,
             "selected_org_id": selected_org_id,
+            "can_delete_files": can_delete_files,
+            "current_url": current_url,
             "path": path,
             "crumbs": crumbs,
             "folders": folders_sorted,
             "leaf_items": leaf_items,
+        },
+    )
+    resp.headers["Cache-Control"] = "no-store, max-age=0"
+    resp.headers["Pragma"] = "no-cache"
+    return resp
+
+
+@router.get("/auditor/index-kb", response_class=HTMLResponse)
+def auditor_index_kb_page(
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+    org_id: int | None = None,
+    sheet: str | None = None,
+    q: str | None = None,
+) -> HTMLResponse:
+    orgs = _get_accessible_orgs_for_auditor(db, user)
+    if not orgs:
+        return templates.TemplateResponse(
+            "empty.html",
+            {"request": request, "user": user, "message": "Нет доступных организаций. Обратитесь к администратору."},
+        )
+
+    selected_org_id = org_id or orgs[0].id
+    _require_auditor_or_admin_for_org(db, user, selected_org_id)
+
+    template_path = settings.index_kb_template_path
+    if not template_path or not os.path.exists(template_path):
+        resp = templates.TemplateResponse(
+            "auditor_index_kb.html",
+            {
+                "request": request,
+                "user": user,
+                "container_class": "container-wide",
+                "orgs": orgs,
+                "selected_org_id": selected_org_id,
+                "template_path": template_path,
+                "error": "Не найден эталонный шаблон Индекс КБ (.xlsx).",
+            },
+            status_code=200,
+        )
+        resp.headers["Cache-Control"] = "no-store, max-age=0"
+        resp.headers["Pragma"] = "no-cache"
+        return resp
+
+    tpl = get_index_kb_template(template_path)
+    sheet_names = tpl.sheet_names
+    selected_sheet = sheet if sheet in sheet_names else (sheet_names[0] if sheet_names else "")
+    q_hits = q.strip() if q else ""
+
+    # Заполняем workbook значениями "факта" (колонка ввода N в эталоне) по short_name и считаем формулы.
+    wb, rollups_by_sheet = fill_workbook_for_org(template_path, selected_org_id, db)
+    evaluator = build_evaluator_from_openpyxl_workbook(wb)
+
+    # rollups for selected sheet
+    rollups = rollups_by_sheet.get(selected_sheet, {})
+    total_short_names = len(rollups)
+    uploaded_short_names = len([r for r in rollups.values() if r.state == "uploaded"])
+    completion_pct = int(round((uploaded_short_names * 100.0 / total_short_names), 0)) if total_short_names else 0
+
+    ws = wb[selected_sheet]
+
+    # Determine which short_names should be highlighted/filtered
+    state_by_sn = {k: v.state for k, v in rollups.items()}
+
+    def get_cell_text(cell) -> str:
+        v = cell.value
+        if v is None:
+            return ""
+        if isinstance(v, str):
+            txt = v.strip()
+            if txt.startswith("="):
+                # Show computed value if possible
+                try:
+                    val = evaluator.eval(ws.title, cell.coordinate)
+                except Exception:
+                    val = None
+                return "" if val is None else str(val)
+            return txt
+        # numbers/dates
+        return str(v)
+
+    def get_cell_class(cell, text: str) -> str:
+        if not text:
+            return ""
+        # highlight if the whole cell is a token OR contains a token
+        tok = text.strip()
+        if tok.upper() in state_by_sn:
+            st = state_by_sn[tok.upper()]
+            base = "indexkb-cell-token"
+            if st == "uploaded":
+                return f"{base} indexkb-ok"
+            if st == "partial":
+                return f"{base} indexkb-warn"
+            if st == "missing":
+                return f"{base} indexkb-bad"
+            return base
+        return ""
+
+    grid = list(iter_render_rows(ws, get_cell_text=get_cell_text, get_cell_class=get_cell_class, max_cells=30000))
+
+    resp = templates.TemplateResponse(
+        "auditor_index_kb.html",
+        {
+            "request": request,
+            "user": user,
+            "container_class": "container-wide",
+            "orgs": orgs,
+            "selected_org_id": selected_org_id,
+            "sheet_names": sheet_names,
+            "selected_sheet": selected_sheet,
+            "q": q_hits,
+            "grid": grid,
+            "total_short_names": total_short_names,
+            "uploaded_short_names": uploaded_short_names,
+            "completion_pct": completion_pct,
+            "template_path": template_path,
+            "error": None,
         },
     )
     resp.headers["Cache-Control"] = "no-store, max-age=0"
@@ -1009,7 +1190,12 @@ def auditor_download_current_file(
     oa = db.get(OrgArtifact, org_artifact_id)
     if not oa:
         raise HTTPException(status_code=404, detail="Артефакт организации не найден")
-    _require_auditor_or_admin_for_org(db, user, oa.org_id)
+    role = get_user_role_for_org(db, user, oa.org_id)
+    if role not in (Role.auditor, Role.admin):
+        raise HTTPException(status_code=403, detail="Требуются права auditor/admin")
+    # История версий доступна только админу: auditor видит/скачивает только текущую версию
+    if version is not None and role != Role.admin:
+        raise HTTPException(status_code=403, detail="История версий доступна только админу")
 
     qv = db.query(FileVersion).filter(FileVersion.org_artifact_id == oa.id)
     if version is not None:
@@ -1021,6 +1207,108 @@ def auditor_download_current_file(
 
     headers = {"Content-Disposition": f'attachment; filename="{fv.original_filename}"'}
     return Response(content=fv.blob, media_type=fv.content_type, headers=headers)
+
+
+@router.post("/auditor/org_artifacts/{org_artifact_id}/delete")
+def admin_delete_current_file_for_org_artifact(
+    org_artifact_id: int,
+    request: Request,
+    back: str = Form(""),
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> Response:
+    oa = db.get(OrgArtifact, org_artifact_id)
+    if not oa:
+        raise HTTPException(status_code=404, detail="Артефакт организации не найден")
+    role = get_user_role_for_org(db, user, oa.org_id)
+    if role != Role.admin:
+        raise HTTPException(status_code=403, detail="Требуются права admin")
+
+    before = {"status": oa.status.value, "current_file_version_id": oa.current_file_version_id}
+
+    fv = db.get(FileVersion, oa.current_file_version_id) if oa.current_file_version_id else None
+    if fv and (fv.storage_key or "").startswith("nextcloud:"):
+        remote_path = (fv.storage_key or "")[len("nextcloud:") :].strip()
+        if remote_path:
+            # allow re-import on next sync after manual delete
+            db.query(NextcloudRemoteFileState).filter(
+                NextcloudRemoteFileState.org_id == oa.org_id,
+                NextcloudRemoteFileState.remote_path == remote_path,
+            ).delete(synchronize_session=False)
+
+    oa.current_file_version_id = None
+    oa.status = OrgArtifactStatus.missing
+    oa.updated_at = datetime.utcnow()
+    oa.updated_by_user_id = user.id
+    after = {"status": oa.status.value, "current_file_version_id": oa.current_file_version_id}
+
+    write_audit_log(
+        db,
+        actor=user,
+        org_id=oa.org_id,
+        action="delete_file",
+        entity_type="org_artifact",
+        entity_id=str(oa.id),
+        before=before,
+        after=after,
+        request=request,
+    )
+    db.commit()
+
+    # Prefer explicit back (sent by form), fallback to referer.
+    ref = (back or "").strip() or (request.headers.get("referer") or "")
+    if not ref or "://" in ref or not ref.startswith("/"):
+        ref = f"/auditor/files?org_id={oa.org_id}"
+    return _redirect(ref)
+
+
+@router.get("/admin/org_artifacts/{org_artifact_id}/versions", response_class=HTMLResponse)
+def admin_org_artifact_versions_page(
+    org_artifact_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_admin),
+    back: str | None = None,
+) -> HTMLResponse:
+    oa = db.get(OrgArtifact, org_artifact_id)
+    if not oa:
+        raise HTTPException(status_code=404, detail="Артефакт организации не найден")
+    a = db.get(Artifact, oa.artifact_id)
+    org = db.get(Organization, oa.org_id)
+    if not a or not org:
+        raise HTTPException(status_code=404, detail="Данные не найдены")
+
+    CreatedBy = aliased(User)
+    versions = (
+        db.query(FileVersion, CreatedBy)
+        .outerjoin(CreatedBy, CreatedBy.id == FileVersion.created_by_user_id)
+        .filter(FileVersion.org_artifact_id == oa.id)
+        .order_by(FileVersion.version_no.desc())
+        .all()
+    )
+    rows = [
+        {
+            "id": fv.id,
+            "version_no": fv.version_no,
+            "original_filename": fv.original_filename,
+            "created_at": fv.created_at,
+            "created_by_login": created_by.login if created_by else "",
+        }
+        for (fv, created_by) in versions
+    ]
+
+    # safe back url: allow only local paths
+    back_url = back or (request.headers.get("referer") or f"/auditor/files?org_id={oa.org_id}")
+    if "://" in back_url:
+        back_url = f"/auditor/files?org_id={oa.org_id}"
+
+    resp = templates.TemplateResponse(
+        "admin/org_artifact_versions.html",
+        {"request": request, "user": user, "oa": oa, "a": a, "org": org, "versions": rows, "back_url": back_url},
+    )
+    resp.headers["Cache-Control"] = "no-store, max-age=0"
+    resp.headers["Pragma"] = "no-cache"
+    return resp
 
 
 @router.post("/my/artifacts/{org_artifact_id}/upload")
@@ -1096,6 +1384,9 @@ def my_artifacts_download(
     role = get_user_role_for_org(db, user, oa.org_id)
     if role != Role.customer:
         raise HTTPException(status_code=403, detail="Недостаточно прав")
+    # Заказчик видит/скачивает только текущую версию
+    if version is not None:
+        raise HTTPException(status_code=403, detail="История версий недоступна")
 
     qv = db.query(FileVersion).filter(FileVersion.org_artifact_id == oa.id)
     if version is not None:
@@ -1360,6 +1651,134 @@ def admin_index(request: Request, user: User = Depends(require_admin)) -> HTMLRe
     return templates.TemplateResponse("admin/index.html", {"request": request, "user": user})
 
 
+def _get_nextcloud_settings(db: Session) -> NextcloudIntegrationSettings:
+    s = db.query(NextcloudIntegrationSettings).order_by(NextcloudIntegrationSettings.id.asc()).first()
+    if not s:
+        s = NextcloudIntegrationSettings()
+        db.add(s)
+        db.commit()
+        db.refresh(s)
+    return s
+
+
+@router.get("/admin/integrations/nextcloud", response_class=HTMLResponse)
+def admin_nextcloud_page(request: Request, db: Session = Depends(get_db), user: User = Depends(require_admin)) -> HTMLResponse:
+    s = _get_nextcloud_settings(db)
+    ok = "Настройки сохранены." if request.query_params.get("saved") == "1" else None
+    return templates.TemplateResponse(
+        "admin/nextcloud.html",
+        {"request": request, "user": user, "s": s, "error": None, "ok": ok, "discovered_orgs": None, "stats": None},
+    )
+
+
+@router.post("/admin/integrations/nextcloud/save")
+def admin_nextcloud_save(
+    request: Request,
+    base_url: str = Form(...),
+    username: str = Form(...),
+    password: str = Form(...),
+    root_folder: str = Form(""),
+    create_orgs: str = Form("true"),
+    is_enabled: str = Form("false"),
+    db: Session = Depends(get_db),
+    user: User = Depends(require_admin),
+) -> Response:
+    s = _get_nextcloud_settings(db)
+    s.base_url = (base_url or "").strip()
+    s.username = (username or "").strip()
+    s.password = password or ""
+    s.root_folder = (root_folder or "").strip().strip("/")
+    s.create_orgs = str(create_orgs).lower() == "true"
+    s.is_enabled = str(is_enabled).lower() == "true"
+    s.last_error = ""
+    db.commit()
+    return _redirect("/admin/integrations/nextcloud?saved=1")
+
+
+def _dav_from_settings(s: NextcloudIntegrationSettings) -> NextcloudDavClient:
+    webdav_base = build_webdav_base_url(s.base_url, s.username)
+    return NextcloudDavClient(base_webdav_url=webdav_base, username=s.username, password=s.password)
+
+
+@router.post("/admin/integrations/nextcloud/test", response_class=HTMLResponse)
+def admin_nextcloud_test(request: Request, db: Session = Depends(get_db), user: User = Depends(require_admin)) -> HTMLResponse:
+    s = _get_nextcloud_settings(db)
+    try:
+        dav = _dav_from_settings(s)
+        dav.propfind(s.root_folder, depth=1)
+        s.last_error = ""
+        db.commit()
+        ok = "Подключение успешно. WebDAV доступен."
+        err = None
+    except Exception as e:
+        s.last_error = str(e)
+        db.commit()
+        ok = None
+        err = f"Ошибка подключения: {e}"
+    return templates.TemplateResponse(
+        "admin/nextcloud.html",
+        {"request": request, "user": user, "s": s, "error": err, "ok": ok, "discovered_orgs": None, "stats": None},
+    )
+
+
+@router.post("/admin/integrations/nextcloud/discover", response_class=HTMLResponse)
+def admin_nextcloud_discover(request: Request, db: Session = Depends(get_db), user: User = Depends(require_admin)) -> HTMLResponse:
+    s = _get_nextcloud_settings(db)
+    try:
+        dav = _dav_from_settings(s)
+        items = dav.propfind(s.root_folder, depth=1)
+        orgs = sorted({x.name for x in items if x.is_dir and x.name})
+        s.last_error = ""
+        db.commit()
+        return templates.TemplateResponse(
+            "admin/nextcloud.html",
+            {"request": request, "user": user, "s": s, "error": None, "ok": f"Найдено папок организаций: {len(orgs)}", "discovered_orgs": orgs, "stats": None},
+        )
+    except Exception as e:
+        s.last_error = str(e)
+        db.commit()
+        return templates.TemplateResponse(
+            "admin/nextcloud.html",
+            {"request": request, "user": user, "s": s, "error": f"Ошибка: {e}", "ok": None, "discovered_orgs": None, "stats": None},
+        )
+
+
+@router.post("/admin/integrations/nextcloud/sync", response_class=HTMLResponse)
+def admin_nextcloud_sync(request: Request, db: Session = Depends(get_db), user: User = Depends(require_admin)) -> HTMLResponse:
+    s = _get_nextcloud_settings(db)
+    if not s.is_enabled:
+        return templates.TemplateResponse(
+            "admin/nextcloud.html",
+            {"request": request, "user": user, "s": s, "error": "Интеграция выключена (включите и сохраните настройки).", "ok": None, "discovered_orgs": None, "stats": None},
+            status_code=400,
+        )
+    try:
+        dav = _dav_from_settings(s)
+        stats = sync_from_nextcloud(
+            db=db,
+            actor=user,
+            dav=dav,
+            root_folder=s.root_folder,
+            create_orgs=s.create_orgs,
+            request=request,
+        )
+        s.last_sync_at = datetime.utcnow()
+        s.last_error = ""
+        db.commit()
+        return templates.TemplateResponse(
+            "admin/nextcloud.html",
+            {"request": request, "user": user, "s": s, "error": None, "ok": "Синхронизация завершена.", "discovered_orgs": None, "stats": stats},
+        )
+    except Exception as e:
+        s.last_error = str(e)
+        db.commit()
+        return templates.TemplateResponse(
+            "admin/nextcloud.html",
+            {"request": request, "user": user, "s": s, "error": f"Ошибка синхронизации: {e}", "ok": None, "discovered_orgs": None, "stats": None},
+            status_code=500,
+        )
+
+
 @router.get("/admin/artifacts", response_class=HTMLResponse)
 def admin_artifacts(request: Request, user: User = Depends(require_admin)) -> HTMLResponse:
     return templates.TemplateResponse("admin/artifacts.html", {"request": request, "user": user, "result": None, "error": None})
@@ -1539,9 +1958,93 @@ def admin_artifacts_import_apply(
 
 
 @router.get("/admin/orgs", response_class=HTMLResponse)
-def admin_orgs(request: Request, db: Session = Depends(get_db), user: User = Depends(require_admin)) -> HTMLResponse:
-    orgs = db.query(Organization).order_by(Organization.name.asc()).all()
-    return templates.TemplateResponse("admin/orgs.html", {"request": request, "user": user, "orgs": orgs, "error": None})
+def admin_orgs(
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_admin),
+    page: int = 1,
+    page_size: int = 20,
+    sort: str = "created_at",
+    dir: str = "desc",
+) -> HTMLResponse:
+    page = max(int(page or 1), 1)
+    page_size = int(page_size or 20)
+    if page_size < 10:
+        page_size = 10
+    if page_size > 200:
+        page_size = 200
+
+    sort_key = (sort or "created_at").strip().lower()
+    sort_dir = (dir or "desc").strip().lower()
+    if sort_dir not in ("asc", "desc"):
+        sort_dir = "desc"
+
+    # For "created_by" sorting we need the creator login; use an outer join to avoid N+1.
+    creator_login = func.coalesce(User.login, Organization.created_via)
+    base_q = db.query(Organization, creator_login.label("creator_login")).outerjoin(User, User.id == Organization.created_by_user_id)
+
+    if sort_key == "name":
+        order_expr = Organization.name.asc() if sort_dir == "asc" else Organization.name.desc()
+        base_q = base_q.order_by(order_expr, Organization.id.desc())
+    elif sort_key == "created_by":
+        order_expr = creator_login.asc() if sort_dir == "asc" else creator_login.desc()
+        base_q = base_q.order_by(order_expr, Organization.created_at.desc(), Organization.id.desc())
+    else:
+        # created_at
+        order_expr = Organization.created_at.asc() if sort_dir == "asc" else Organization.created_at.desc()
+        base_q = base_q.order_by(order_expr, Organization.id.desc())
+
+    total = base_q.count()
+
+    total_pages = max((total + page_size - 1) // page_size, 1)
+    if page > total_pages:
+        page = total_pages
+    offset = (page - 1) * page_size
+
+    rows = base_q.offset(offset).limit(page_size).all()
+
+    org_rows = []
+    for (o, creator_login_val) in rows:
+        if o.created_by_user_id and creator_login_val and str(creator_login_val) not in ("system", "nextcloud", "manual"):
+            created_by_label = str(creator_login_val)
+        else:
+            via = getattr(o, "created_via", "") or ""
+            if via == "nextcloud":
+                created_by_label = "Синхронизация (Nextcloud)"
+            elif via == "system":
+                created_by_label = "Система"
+            else:
+                created_by_label = "—"
+        org_rows.append({"org": o, "created_by_label": created_by_label})
+
+    base_query = urlencode({"page_size": str(page_size), "sort": sort_key, "dir": sort_dir})
+    window = 3
+    start = max(1, page - window)
+    end = min(total_pages, page + window)
+    page_links = list(range(start, end + 1))
+
+    resp = templates.TemplateResponse(
+        "admin/orgs.html",
+        {
+            "request": request,
+            "user": user,
+            "orgs": org_rows,
+            "error": None,
+            "page": page,
+            "page_size": page_size,
+            "total": total,
+            "total_pages": total_pages,
+            "has_prev": page > 1,
+            "has_next": offset + page_size < total,
+            "page_links": page_links,
+            "base_query": base_query,
+            "sort": sort_key,
+            "dir": sort_dir,
+        },
+    )
+    resp.headers["Cache-Control"] = "no-store, max-age=0"
+    resp.headers["Pragma"] = "no-cache"
+    return resp
 
 
 @router.post("/admin/orgs")
@@ -1567,7 +2070,7 @@ def admin_orgs_create(
             {"request": request, "user": user, "orgs": orgs, "error": "Организация уже существует"},
             status_code=400,
         )
-    db.add(Organization(name=name))
+    db.add(Organization(name=name, created_by_user_id=user.id, created_via="manual"))
     db.commit()
     return _redirect("/admin/orgs")
 
@@ -1607,10 +2110,124 @@ def admin_orgs_edit_save(
     return _redirect("/admin/orgs")
 
 
+@router.post("/admin/orgs/{org_id}/delete")
+def admin_orgs_delete(
+    org_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_admin),
+) -> Response:
+    org = db.get(Organization, org_id)
+    if not org:
+        raise HTTPException(status_code=404, detail="Организация не найдена")
+    try:
+        db.delete(org)
+        db.commit()
+        return _redirect("/admin/orgs")
+    except IntegrityError:
+        db.rollback()
+        orgs = db.query(Organization).order_by(Organization.created_at.desc(), Organization.id.desc()).all()
+        resp = templates.TemplateResponse(
+            "admin/orgs.html",
+            {
+                "request": request,
+                "user": user,
+                "orgs": orgs,
+                "error": "Нельзя удалить организацию: есть связанные данные (артефакты/пользователи/файлы).",
+            },
+            status_code=400,
+        )
+        resp.headers["Cache-Control"] = "no-store, max-age=0"
+        resp.headers["Pragma"] = "no-cache"
+        return resp
+
+
 @router.get("/admin/users", response_class=HTMLResponse)
-def admin_users(request: Request, db: Session = Depends(get_db), user: User = Depends(require_admin)) -> HTMLResponse:
-    users = db.query(User).order_by(User.login.asc()).all()
-    return templates.TemplateResponse("admin/users.html", {"request": request, "user": user, "users": users, "error": None})
+def admin_users(
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_admin),
+    org_id: str | None = None,
+    page: int = 1,
+    page_size: int = 50,
+    sort: str = "login",
+    dir: str = "asc",
+) -> HTMLResponse:
+    page = max(int(page or 1), 1)
+    page_size = int(page_size or 50)
+    if page_size < 10:
+        page_size = 10
+    if page_size > 200:
+        page_size = 200
+
+    orgs = db.query(Organization).order_by(Organization.name.asc()).all()
+    selected_org_id = int(org_id) if (org_id and str(org_id).isdigit()) else None
+
+    sort_key = (sort or "login").strip().lower()
+    sort_dir = (dir or "asc").strip().lower()
+    if sort_dir not in ("asc", "desc"):
+        sort_dir = "asc"
+
+    q = db.query(User)
+    if selected_org_id:
+        q = q.join(UserOrgMembership, UserOrgMembership.user_id == User.id).filter(UserOrgMembership.org_id == selected_org_id)
+
+    if sort_key == "created_at":
+        order_expr = User.created_at.asc() if sort_dir == "asc" else User.created_at.desc()
+        q = q.order_by(order_expr, User.login.asc())
+    elif sort_key == "is_admin":
+        order_expr = User.is_admin.asc() if sort_dir == "asc" else User.is_admin.desc()
+        q = q.order_by(order_expr, User.login.asc())
+    elif sort_key == "is_active":
+        order_expr = User.is_active.asc() if sort_dir == "asc" else User.is_active.desc()
+        q = q.order_by(order_expr, User.login.asc())
+    else:
+        # login
+        order_expr = User.login.asc() if sort_dir == "asc" else User.login.desc()
+        q = q.order_by(order_expr)
+
+    total = q.count()
+    total_pages = max((total + page_size - 1) // page_size, 1)
+    if page > total_pages:
+        page = total_pages
+    offset = (page - 1) * page_size
+    users = q.offset(offset).limit(page_size).all()
+
+    base_qd: dict[str, str] = {"page_size": str(page_size), "sort": sort_key, "dir": sort_dir}
+    if selected_org_id:
+        base_qd["org_id"] = str(selected_org_id)
+    base_query = urlencode(base_qd)
+    window = 3
+    start = max(1, page - window)
+    end = min(total_pages, page + window)
+    page_links = list(range(start, end + 1))
+    current_url = request.url.path + (f"?{request.url.query}" if request.url.query else "")
+
+    resp = templates.TemplateResponse(
+        "admin/users.html",
+        {
+            "request": request,
+            "user": user,
+            "users": users,
+            "orgs": orgs,
+            "selected_org_id": selected_org_id,
+            "error": None,
+            "page": page,
+            "page_size": page_size,
+            "total": total,
+            "total_pages": total_pages,
+            "has_prev": page > 1,
+            "has_next": offset + page_size < total,
+            "page_links": page_links,
+            "base_query": base_query,
+            "current_url": current_url,
+            "sort": sort_key,
+            "dir": sort_dir,
+        },
+    )
+    resp.headers["Cache-Control"] = "no-store, max-age=0"
+    resp.headers["Pragma"] = "no-cache"
+    return resp
 
 
 @router.post("/admin/users")
@@ -1647,6 +2264,51 @@ def admin_users_create(
     db.add(new_user)
     db.commit()
     return _redirect("/admin/users")
+
+
+@router.post("/admin/users/{user_id}/toggle_active")
+def admin_users_toggle_active(
+    user_id: int,
+    request: Request,
+    back: str = Form(""),
+    db: Session = Depends(get_db),
+    user: User = Depends(require_admin),
+) -> Response:
+    u = db.get(User, user_id)
+    if not u:
+        raise HTTPException(status_code=404, detail="Пользователь не найден")
+    if u.id == user.id:
+        # Не даём заблокировать себя, чтобы не потерять доступ.
+        return _redirect(back or "/admin/users")
+    u.is_active = not bool(u.is_active)
+    db.commit()
+    return _redirect(back or "/admin/users")
+
+
+@router.post("/admin/users/{user_id}/delete")
+def admin_users_delete(
+    user_id: int,
+    request: Request,
+    back: str = Form(""),
+    db: Session = Depends(get_db),
+    user: User = Depends(require_admin),
+) -> Response:
+    u = db.get(User, user_id)
+    if not u:
+        raise HTTPException(status_code=404, detail="Пользователь не найден")
+    if u.id == user.id:
+        # Не даём удалить себя.
+        return _redirect(back or "/admin/users")
+    try:
+        # Сначала удаляем роли/привязки к организациям (иначе ORM пытается проставить NULL в user_id).
+        db.query(UserOrgMembership).filter(UserOrgMembership.user_id == u.id).delete(synchronize_session=False)
+        db.delete(u)
+        db.commit()
+        return _redirect(back or "/admin/users")
+    except IntegrityError:
+        db.rollback()
+        # Фоллбек: не падаем 500, а возвращаемся назад.
+        return _redirect(back or "/admin/users")
 
 
 @router.get("/admin/users/{user_id}/edit", response_class=HTMLResponse)
@@ -1757,3 +2419,37 @@ def admin_memberships_create(
         db.add(UserOrgMembership(user_id=user_id, org_id=org_id, role=role_enum))
     db.commit()
     return _redirect("/admin/memberships")
+
+
+@router.get("/admin/orgs/{org_id}/users", response_class=HTMLResponse)
+def admin_org_users(
+    org_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_admin),
+) -> HTMLResponse:
+    org = db.get(Organization, org_id)
+    if not org:
+        raise HTTPException(status_code=404, detail="Организация не найдена")
+
+    memberships = (
+        db.query(UserOrgMembership)
+        .join(User, User.id == UserOrgMembership.user_id)
+        .filter(UserOrgMembership.org_id == org_id)
+        .order_by(User.login.asc())
+        .all()
+    )
+    role_labels = {"admin": "Администратор", "auditor": "Аудитор", "customer": "Заказчик"}
+    resp = templates.TemplateResponse(
+        "admin/org_users.html",
+        {
+            "request": request,
+            "user": user,
+            "org": org,
+            "memberships": memberships,
+            "role_labels": role_labels,
+        },
+    )
+    resp.headers["Cache-Control"] = "no-store, max-age=0"
+    resp.headers["Pragma"] = "no-cache"
+    return resp

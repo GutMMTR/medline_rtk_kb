@@ -30,7 +30,7 @@ def ensure_default_admin(db: Session) -> None:
 
     default_org = db.query(Organization).filter(Organization.name == "Default").one_or_none()
     if not default_org:
-        default_org = Organization(name="Default")
+        default_org = Organization(name="Default", created_via="system")
         db.add(default_org)
         db.flush()
 

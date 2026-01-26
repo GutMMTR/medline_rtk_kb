@@ -3,6 +3,8 @@ from app.db.models import (  # noqa: F401
     ArtifactNode,
     AuditLog,
     FileVersion,
+    NextcloudIntegrationSettings,
+    NextcloudRemoteFileState,
     OrgArtifact,
     OrgArtifactComment,
     OrgArtifactStatus,

@@ -1,0 +1,85 @@
+{% extends "base.html" %}
+{% block content %}
+  <div class="section-header">
+    <div>
+      <h2 style="margin:0">Индекс КБ</h2>
+      <div class="muted">Копия эталонного Excel-отчёта. В ячейках с сокращениями показываем статус по организации.</div>
+    </div>
+    <div class="row-right">
+      <form method="get" action="/auditor/index-kb" class="header-inline-form">
+        <input type="hidden" name="sheet" value="{{ selected_sheet }}" />
+        <input type="hidden" name="q" value="{{ q or '' }}" />
+        <label style="margin:0">Организация</label>
+        <select name="org_id" onchange="this.form.submit()">
+          {% for o in orgs %}
+            <option value="{{ o.id }}" {% if o.id == selected_org_id %}selected{% endif %}>{{ o.name }}</option>
+          {% endfor %}
+        </select>
+      </form>
+      <a class="btn btn-secondary" href="/auditor/artifacts?org_id={{ selected_org_id }}">Артефакты</a>
+      <a class="btn btn-secondary" href="/auditor/files?org_id={{ selected_org_id }}">Файлы</a>
+      <a class="btn btn-secondary" href="/artifacts">Справочник</a>
+    </div>
+  </div>
+
+  {% if error %}
+    <div class="card">
+      <div class="error">{{ error }}</div>
+      <div class="hint">Ожидаем файл по пути: <span class="mono">{{ template_path }}</span> (монтируется из <span class="mono">docs/</span>).</div>
+    </div>
+  {% else %}
+    <div class="card">
+      <div class="indexkb-tabs">
+        {% for s in sheet_names %}
+          <a class="indexkb-tab {% if s == selected_sheet %}indexkb-tab-active{% endif %}" href="/auditor/index-kb?org_id={{ selected_org_id }}&sheet={{ s }}&q={{ q|urlencode }}">
+            {{ s }}
+          </a>
+        {% endfor %}
+      </div>
+
+      <form method="get" action="/auditor/index-kb" class="grid filter-form filter-form--nostatus" style="margin-top:12px">
+        <input type="hidden" name="org_id" value="{{ selected_org_id }}" />
+        <input type="hidden" name="sheet" value="{{ selected_sheet }}" />
+        <div class="filter-short" style="grid-column: span 5">
+          <label>Поиск по сокращенному</label>
+          <input name="q" value="{{ q or '' }}" placeholder="например: СЗИ.2FA.1" />
+        </div>
+        <div class="filter-actions">
+          <button class="btn" type="submit">Найти</button>
+        </div>
+      </form>
+
+      <div class="muted" style="margin-top:10px">
+        Лист: <b>{{ selected_sheet }}</b> · сокращений: <b>{{ total_short_names }}</b> · заполнено: <b>{{ uploaded_short_names }}</b> ({{ completion_pct }}%)
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="table-wrap">
+        <table class="indexkb-table">
+          <tbody>
+            {% for row in grid %}
+              <tr>
+                {% for c in row %}
+                  <td
+                    class="{{ c.css_class }}"
+                    {% if c.rowspan and c.rowspan > 1 %}rowspan="{{ c.rowspan }}"{% endif %}
+                    {% if c.colspan and c.colspan > 1 %}colspan="{{ c.colspan }}"{% endif %}
+                  >
+                    {{ c.value }}
+                  </td>
+                {% endfor %}
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      <div class="hint" style="margin-top:10px">
+        Подсветка: <span class="indexkb-legend indexkb-ok">загружено</span>,
+        <span class="indexkb-legend indexkb-warn">частично</span>,
+        <span class="indexkb-legend indexkb-bad">не загружено</span>.
+      </div>
+    </div>
+  {% endif %}
+{% endblock %}
+

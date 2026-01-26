@@ -24,8 +24,19 @@ class CorrelationIdMiddleware(BaseHTTPMiddleware):
         return response
 
 
+class NoStoreHtmlMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        response = await call_next(request)
+        ctype = (response.headers.get("content-type") or "").lower()
+        if "text/html" in ctype:
+            response.headers.setdefault("Cache-Control", "no-store, max-age=0")
+            response.headers.setdefault("Pragma", "no-cache")
+        return response
+
+
 app = FastAPI(title="Медлайн.РТК.КБ - Хранилище файлов (MVP)")
 app.add_middleware(CorrelationIdMiddleware)
+app.add_middleware(NoStoreHtmlMiddleware)
 
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
 app.include_router(web_router)

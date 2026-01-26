@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>{{ title or "Медлайн.РТК.КБ" }}</title>
-    <link rel="stylesheet" href="/static/app.css?v=20" />
+    <link rel="stylesheet" href="/static/app.css?v=23" />
     <link rel="icon" href="/static/brand/rtk_mark.svg" type="image/svg+xml" />
   </head>
   <body>
@@ -32,5 +32,31 @@
     <div class="{{ container_class or 'container' }}">
       {% block content %}{% endblock %}
     </div>
+    <script>
+      (function () {
+        // marker for debugging cache issues
+        window.__dt_localize_v = "dt-localize-v1";
+        function pad2(n) { return String(n).padStart(2, '0'); }
+        function fmt(d) {
+          return (
+            d.getFullYear() + '-' +
+            pad2(d.getMonth() + 1) + '-' +
+            pad2(d.getDate()) + ' ' +
+            pad2(d.getHours()) + ':' +
+            pad2(d.getMinutes()) + ':' +
+            pad2(d.getSeconds())
+          );
+        }
+        document.querySelectorAll('.dt[data-dt-utc]').forEach(function (el) {
+          try {
+            var iso = el.getAttribute('data-dt-utc');
+            if (!iso) return;
+            var d = new Date(iso); // ISO with Z => treated as UTC, rendered in local TZ
+            if (isNaN(d.getTime())) return;
+            el.textContent = fmt(d);
+          } catch (e) {}
+        });
+      })();
+    </script>
   </body>
 </html>

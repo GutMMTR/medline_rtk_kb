@@ -31,6 +31,12 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: rgba(10
 textarea { width: 100%; padding: 10px 12px; border:1px solid var(--border-2); border-radius: 12px; font-family: inherit; background:#fff; }
 button, .btn { display:inline-flex; align-items:center; justify-content:center; gap: 8px; padding: 9px 14px; border-radius: 12px; border:1px solid var(--rtk-purple); background: var(--rtk-purple); color:#fff; cursor:pointer; text-decoration:none; font-weight: 600; font-size: 14px; line-height: 1; }
 button:hover, .btn:hover { filter: brightness(.95); }
+button:disabled, .btn[aria-disabled="true"] { opacity: .65; cursor: not-allowed; filter: none; }
+.inline-status { margin-top: 10px; padding: 10px 12px; border-radius: 12px; border: 1px solid var(--border); background: #fff; }
+.inline-status--loading { border-color: rgba(107,45,255,.35); background: rgba(107,45,255,.04); }
+.inline-status--error { border-color: #fda29b; background: #fee4e2; color: #b42318; }
+.nc-actions-header { margin-bottom: 10px; }
+.nc-actions-buttons { margin-top: 6px; }
 .btn-secondary { background:#fff; color: var(--rtk-purple); border-color: rgba(107,45,255,.35); }
 .btn-secondary:hover { background: rgba(107,45,255,.06); }
 .btn-accent { background: var(--rtk-orange); border-color: var(--rtk-orange); color:#fff; }
@@ -81,6 +87,8 @@ th { color:#344054; font-size: 12px; text-transform: uppercase; letter-spacing: 
 .icon-btn:hover { background:#f2f4f7; }
 .icon-danger { color: #b42318; border-color: #fda29b; }
 .icon-danger:hover { background:#fee4e2; }
+/* Optional: keep for other icon images (if any), but SVG is preferred for consistent styling */
+.icon-btn .icon-img { width: 18px; height: 18px; display:block; }
 
 .upload-row { display:flex; align-items:center; gap: 10px; }
 .file-input { width: 260px; }
@@ -89,6 +97,28 @@ th { color:#344054; font-size: 12px; text-transform: uppercase; letter-spacing: 
 .table .icon-btn { height: 32px; width: 36px; }
 .td-actions .row-right { align-items: center; }
 .table td, .table th { vertical-align: middle; }
+
+.comment-box { display:flex; flex-direction:column; gap: 8px; }
+.comment-box--readonly { gap: 6px; }
+.comment-meta { color: var(--muted); font-size: 12px; }
+.comment-text {
+  background: #F8FAFC;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 8px 10px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 120px;
+  overflow: auto;
+}
+.comment-form { display:flex; flex-direction:column; gap: 8px; }
+.comment-input {
+  min-height: 56px;
+  resize: vertical;
+  background: #fff;
+}
+.comment-actions { display:flex; justify-content:flex-end; }
+.comment-cell { max-width: 320px; }
 
 .section-header { display:flex; align-items:center; justify-content:space-between; gap: 12px; flex-wrap: wrap; }
 .section-header h3 { margin: 0; }
@@ -112,16 +142,95 @@ th { color:#344054; font-size: 12px; text-transform: uppercase; letter-spacing: 
 .page-chip-active { background:#101828; color:#fff; border-color:#101828; }
 .pagination-jump { display:flex; align-items:center; gap: 8px; }
 
+/* Admin home */
+.admin-home{
+  max-width: 1120px;
+  margin: 26px auto 60px;
+  padding: 0 16px;
+}
+.admin-home-title{
+  font-size: 34px;
+  font-weight: 850;
+  letter-spacing: -0.02em;
+  margin: 6px 0 4px;
+}
+.admin-home-subtitle{
+  color: var(--muted);
+  margin-bottom: 16px;
+}
+.admin-grid{
+  display:grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+@media (min-width: 980px){
+  .admin-grid{ grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
+.admin-tile{
+  display:flex;
+  align-items:flex-start;
+  gap: 12px;
+  padding: 16px;
+  border-radius: 16px;
+  border: 1px solid var(--border);
+  background: #fff;
+  box-shadow: var(--shadow);
+  text-decoration:none;
+  color: var(--text);
+  min-height: 92px;
+}
+.admin-tile:hover{ transform: translateY(-1px); box-shadow: 0 10px 22px rgba(16,24,40,.10); }
+.admin-tile-icon{
+  width: 42px; height: 42px;
+  border-radius: 12px;
+  background: rgba(107,45,255,.10);
+  border: 1px solid rgba(107,45,255,.18);
+  display:flex; align-items:center; justify-content:center;
+  color: var(--rtk-purple);
+  flex: 0 0 auto;
+}
+.admin-tile-title{ font-weight: 800; margin: 1px 0 4px; }
+.admin-tile-desc{ color: var(--muted); font-size: 13px; line-height: 1.35; }
+
+/* Index KB */
+.indexkb-tabs { display:flex; gap: 8px; flex-wrap: wrap; }
+.indexkb-tab { display:inline-flex; align-items:center; height: 34px; padding: 0 12px; border-radius: 999px; border: 1px solid #d0d5dd; background:#fff; color:#101828; text-decoration:none; font-weight: 600; }
+.indexkb-tab:hover { background:#f2f4f7; }
+.indexkb-tab-active { background: var(--rtk-purple); color:#fff; border-color: var(--rtk-purple); }
+
+.indexkb-table { width:100%; border-collapse: collapse; table-layout: fixed; }
+.indexkb-table td { border: 1px solid #eaecf0; padding: 8px; vertical-align: top; white-space: pre-wrap; word-break: break-word; }
+.indexkb-cell-token { outline: 2px solid rgba(107,45,255,.35); outline-offset: -2px; border-radius: 6px; }
+.indexkb-ok { background: rgba(18,183,106,.12); }
+.indexkb-warn { background: rgba(247,144,9,.14); }
+.indexkb-bad { background: rgba(180,35,24,.10); }
+.indexkb-legend { display:inline-block; padding: 2px 8px; border-radius: 999px; border: 1px solid #eaecf0; margin-right: 6px; }
+
 /* Auth page */
+.auth-bg{
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  background:
+    radial-gradient(1100px 720px at 22% 46%, rgba(107,45,255,.30), transparent 62%),
+    radial-gradient(1100px 720px at 55% 55%, rgba(0,200,255,.22), transparent 62%),
+    radial-gradient(900px 620px at 80% 35%, rgba(255,79,18,.16), transparent 62%),
+    linear-gradient(180deg, rgba(246,247,251,1) 0%, rgba(246,247,251,1) 100%);
+}
 .auth-shell{
   position: relative;
+  z-index: 1;
   min-height: calc(100vh - 64px);
   display: grid;
   grid-template-columns: 1.2fr 520px;
   gap: 24px;
   align-items: center;
   padding: 28px 16px;
+  max-width: 1400px;
+  margin: 0 auto;
 }
+.auth-shell--no-overlay:before{ display:none; }
 .auth-shell:before{
   content:"";
   position:absolute;

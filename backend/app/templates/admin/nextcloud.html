@@ -1,0 +1,157 @@
+{% extends "base.html" %}
+{% block content %}
+  <div class="section-header">
+    <div>
+      <h2 style="margin:0">Интеграция · Nextcloud</h2>
+      <div class="muted">Импорт артефактов из Nextcloud по WebDAV. Структура: <span class="mono">ROOT/Организация/SHORT.NAME/PATH/файлы</span>.</div>
+    </div>
+    <div class="row-right">
+      <a class="btn btn-secondary" href="/admin">Назад</a>
+    </div>
+  </div>
+
+  <div class="card">
+    {% if error %}
+      <div class="error">{{ error }}</div>
+    {% endif %}
+    {% if ok %}
+      <div class="inline-status">{{ ok }}</div>
+    {% endif %}
+    <div id="nc-status" class="inline-status inline-status--loading" style="display:none" aria-live="polite"></div>
+
+    <form method="post" action="/admin/integrations/nextcloud/save" class="grid" data-action-label="Сохранение настроек">
+      <div>
+        <label>Base URL</label>
+        <input name="base_url" value="{{ s.base_url }}" placeholder="https://nextcloud.soc.rt.ru" required />
+      </div>
+      <div>
+        <label>Логин</label>
+        <input name="username" value="{{ s.username }}" required />
+      </div>
+      <div>
+        <label>Пароль / App password</label>
+        <input name="password" type="password" value="{{ s.password }}" required />
+        <div class="hint">MVP: хранится в БД. Рекомендуется использовать app password.</div>
+      </div>
+      <div>
+        <label>Корневая папка (в облаке)</label>
+        <input name="root_folder" value="{{ s.root_folder }}" placeholder="(пусто = корень)" />
+      </div>
+      <div>
+        <label>Создавать организации из папок</label>
+        <select name="create_orgs">
+          <option value="true" {% if s.create_orgs %}selected{% endif %}>да</option>
+          <option value="false" {% if not s.create_orgs %}selected{% endif %}>нет</option>
+        </select>
+      </div>
+      <div>
+        <label>Включено</label>
+        <select name="is_enabled">
+          <option value="true" {% if s.is_enabled %}selected{% endif %}>да</option>
+          <option value="false" {% if not s.is_enabled %}selected{% endif %}>нет</option>
+        </select>
+      </div>
+      <div class="filter-actions" style="grid-column: span 2">
+        <button class="btn" type="submit" data-loading-text="Сохраняю…">Сохранить</button>
+      </div>
+    </form>
+  </div>
+
+  <div class="card">
+    <div class="section-header nc-actions-header">
+      <h3 style="margin:0">Действия</h3>
+      <div class="muted">Последняя ошибка: {{ s.last_error or "—" }} · Последняя синхронизация: {{ s.last_sync_at|dt if s.last_sync_at else "—" }}</div>
+    </div>
+    <div class="row-right nc-actions-buttons" style="justify-content:flex-start; gap:10px; flex-wrap: wrap;">
+      <form method="post" action="/admin/integrations/nextcloud/test" style="display:inline" data-action-label="Проверка подключения">
+        <button class="btn btn-secondary" type="submit" data-loading-text="Проверяю…">Проверить подключение</button>
+      </form>
+      <form method="post" action="/admin/integrations/nextcloud/discover" style="display:inline" data-action-label="Поиск организаций в облаке">
+        <button class="btn btn-secondary" type="submit" data-loading-text="Ищу…">Обнаружить организации</button>
+      </form>
+      <form method="post" action="/admin/integrations/nextcloud/sync" style="display:inline" data-action-label="Синхронизация" onsubmit="return confirm('Запустить синхронизацию?')">
+        <button class="btn" type="submit" data-loading-text="Синхронизирую…">Синхронизировать сейчас</button>
+      </form>
+    </div>
+    {% if discovered_orgs %}
+      <div style="margin-top:12px">
+        <div class="muted">Папки организаций в облаке:</div>
+        <div class="folder-grid" style="margin-top:8px">
+          {% for name in discovered_orgs %}
+            <div class="folder-card" style="cursor:default">
+              <div class="folder-icon">📁</div>
+              <div class="folder-name mono">{{ name }}</div>
+            </div>
+          {% endfor %}
+        </div>
+      </div>
+    {% endif %}
+
+    {% if stats %}
+      <div class="card" style="margin-top:12px">
+        <div class="muted">Результат синхронизации:</div>
+        <table class="table" style="margin-top:8px">
+          <tbody>
+            <tr><td>Организаций</td><td class="mono">{{ stats.orgs_seen }}</td></tr>
+            <tr><td>Папок проверено</td><td class="mono">{{ stats.folders_seen }}</td></tr>
+            <tr><td>Файлов найдено</td><td class="mono">{{ stats.files_seen }}</td></tr>
+            <tr><td>Файлов скачано</td><td class="mono">{{ stats.files_downloaded }}</td></tr>
+            <tr><td>Файлов пропущено (идемпотентно)</td><td class="mono">{{ stats.files_skipped }}</td></tr>
+            <tr><td>Создано версий</td><td class="mono">{{ stats.file_versions_created }}</td></tr>
+            <tr><td>Ошибок</td><td class="mono">{{ stats.errors }}</td></tr>
+          </tbody>
+        </table>
+      </div>
+    {% endif %}
+  </div>
+
+  <script>
+    (function() {
+      const status = document.getElementById('nc-status');
+      function showStatus(text, kind) {
+        if (!status) return;
+        status.style.display = 'block';
+        status.classList.remove('inline-status--error');
+        status.classList.add('inline-status--loading');
+        if (kind === 'error') {
+          status.classList.remove('inline-status--loading');
+          status.classList.add('inline-status--error');
+        }
+        status.textContent = text;
+      }
+
+      const forms = document.querySelectorAll('form[action^="/admin/integrations/nextcloud/"]');
+      forms.forEach((form) => {
+        form.addEventListener('submit', (e) => {
+          if (typeof form.checkValidity === 'function' && !form.checkValidity()) {
+            e.preventDefault();
+            if (typeof form.reportValidity === 'function') form.reportValidity();
+            showStatus('Заполните обязательные поля формы.', 'error');
+            return;
+          }
+
+          const label = form.getAttribute('data-action-label') || 'Выполняю действие';
+          showStatus(label + '…', 'loading');
+
+          const btn = form.querySelector('button[type="submit"]');
+          if (btn) {
+            btn.dataset._origText = btn.textContent || '';
+            const loadingText = btn.getAttribute('data-loading-text') || 'Выполняется…';
+            btn.textContent = loadingText;
+            btn.disabled = true;
+            btn.setAttribute('aria-disabled', 'true');
+          }
+
+          // Disable all other action buttons to avoid double submits
+          document.querySelectorAll('button[type="submit"]').forEach((b) => {
+            if (b !== btn) {
+              b.disabled = true;
+              b.setAttribute('aria-disabled', 'true');
+            }
+          });
+        });
+      });
+    })();
+  </script>
+{% endblock %}
+

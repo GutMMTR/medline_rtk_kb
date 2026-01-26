@@ -26,28 +26,103 @@
   <div class="card">
     <div class="section-header">
       <h3 style="margin:0">Таблица</h3>
-      <div class="muted">Всего: {{ orgs|length }}</div>
+      <div class="muted">Показано {{ orgs|length }} из {{ total }}</div>
     </div>
     <div class="table-wrap">
     <table class="table">
-      <thead><tr><th>ID</th><th>Имя</th><th>Создана</th><th class="th-actions"></th></tr></thead>
+      <thead>
+        <tr>
+          <th>
+            <a class="breadcrumb-link" href="/admin/orgs?{{ base_query }}&page=1&sort=name&dir={% if sort == 'name' and dir == 'asc' %}desc{% else %}asc{% endif %}">
+              Имя{% if sort == 'name' %} {% if dir == 'asc' %}▲{% else %}▼{% endif %}{% endif %}
+            </a>
+          </th>
+          <th>
+            <a class="breadcrumb-link" href="/admin/orgs?{{ base_query }}&page=1&sort=created_by&dir={% if sort == 'created_by' and dir == 'asc' %}desc{% else %}asc{% endif %}">
+              Кем создана{% if sort == 'created_by' %} {% if dir == 'asc' %}▲{% else %}▼{% endif %}{% endif %}
+            </a>
+          </th>
+          <th>
+            <a class="breadcrumb-link" href="/admin/orgs?{{ base_query }}&page=1&sort=created_at&dir={% if sort == 'created_at' and dir == 'asc' %}desc{% else %}asc{% endif %}">
+              Создана{% if sort == 'created_at' %} {% if dir == 'asc' %}▲{% else %}▼{% endif %}{% endif %}
+            </a>
+          </th>
+          <th class="th-actions-wide"></th>
+        </tr>
+      </thead>
       <tbody>
-        {% for o in orgs %}
+        {% for r in orgs %}
           <tr>
-            <td>{{ o.id }}</td>
-            <td>{{ o.name }}</td>
-            <td class="mono">{{ o.created_at|dt }}</td>
-            <td class="td-actions">
-              <a class="icon-btn" href="/admin/orgs/{{ o.id }}/edit" title="Редактировать" aria-label="Редактировать">
+            <td>
+              <a class="breadcrumb-link" href="/admin/orgs/{{ r.org.id }}/users" title="Открыть пользователей организации">
+                {{ r.org.name }}
+              </a>
+            </td>
+            <td class="mono">{{ r.created_by_label }}</td>
+            <td class="mono">{{ r.org.created_at|dt }}</td>
+            <td class="td-actions-wide">
+              <div class="row-right">
+                <a class="icon-btn" href="/admin/orgs/{{ r.org.id }}/edit" title="Редактировать" aria-label="Редактировать">
                 <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" focusable="false">
                   <path fill="currentColor" d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zm2.92 2.33H5v-.92l9.06-9.06.92.92L5.92 19.58zM20.71 7.04a1.003 1.003 0 0 0 0-1.42l-2.34-2.34a1.003 1.003 0 0 0-1.42 0l-1.83 1.83 3.75 3.75 1.84-1.82z"/>
                 </svg>
               </a>
+                <form method="post" action="/admin/orgs/{{ r.org.id }}/delete" style="display:inline" onsubmit="return confirm('Удалить организацию?')">
+                  <button class="icon-btn icon-danger" type="submit" title="Удалить" aria-label="Удалить">
+                    <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" focusable="false">
+                      <path fill="currentColor" d="M9 3h6l1 2h4v2H4V5h4l1-2zm-2 4h10l-1 14H8L7 7zm3 3h2v9h-2v-9zm4 0h2v9h-2v-9z"/>
+                    </svg>
+                  </button>
+                </form>
+              </div>
             </td>
           </tr>
         {% endfor %}
       </tbody>
     </table>
+    </div>
+
+    <div class="pagination">
+      <div class="muted">Страница {{ page }} из {{ total_pages }}</div>
+      <div class="pagination-links">
+        {% if has_prev %}
+          <a class="btn btn-secondary" href="/admin/orgs?{{ base_query }}&page=1">⟪</a>
+          <a class="btn btn-secondary" href="/admin/orgs?{{ base_query }}&page={{ page - 1 }}">←</a>
+        {% else %}
+          <span class="btn btn-secondary" aria-disabled="true">⟪</span>
+          <span class="btn btn-secondary" aria-disabled="true">←</span>
+        {% endif %}
+
+        {% if page_links[0] > 1 %}
+          <span class="muted">…</span>
+        {% endif %}
+        {% for p in page_links %}
+          {% if p == page %}
+            <span class="page-chip page-chip-active">{{ p }}</span>
+          {% else %}
+            <a class="page-chip" href="/admin/orgs?{{ base_query }}&page={{ p }}">{{ p }}</a>
+          {% endif %}
+        {% endfor %}
+        {% if page_links[-1] < total_pages %}
+          <span class="muted">…</span>
+        {% endif %}
+
+        {% if has_next %}
+          <a class="btn btn-secondary" href="/admin/orgs?{{ base_query }}&page={{ page + 1 }}">→</a>
+          <a class="btn btn-secondary" href="/admin/orgs?{{ base_query }}&page={{ total_pages }}">⟫</a>
+        {% else %}
+          <span class="btn btn-secondary" aria-disabled="true">→</span>
+          <span class="btn btn-secondary" aria-disabled="true">⟫</span>
+        {% endif %}
+      </div>
+      <form class="pagination-jump" method="get" action="/admin/orgs">
+        <input type="hidden" name="page_size" value="{{ page_size }}" />
+        <input type="hidden" name="sort" value="{{ sort }}" />
+        <input type="hidden" name="dir" value="{{ dir }}" />
+        <label style="margin:0">Перейти</label>
+        <input name="page" type="number" min="1" max="{{ total_pages }}" value="{{ page }}" style="width: 110px" />
+        <button class="btn btn-secondary" type="submit">Ок</button>
+      </form>
     </div>
   </div>
 {% endblock %}

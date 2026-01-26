@@ -61,7 +61,7 @@ def admin_create_org(req: OrgCreate, db: Session = Depends(get_db), user: User =
     exists = db.query(Organization).filter(Organization.name == name).one_or_none()
     if exists:
         raise HTTPException(status_code=400, detail="Организация уже существует")
-    org = Organization(name=name)
+    org = Organization(name=name, created_by_user_id=user.id, created_via="manual")
     db.add(org)
     db.flush()
     write_audit_log(db, actor=user, org_id=None, action="create", entity_type="organization", entity_id=str(org.id), after={"name": name})

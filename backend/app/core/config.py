@@ -12,6 +12,8 @@ class Settings(BaseSettings):
     admin_password: str = "admin12345"
     admin_full_name: str = "Default Admin"
     max_upload_mb: int = 50
+    index_kb_template_path: str = "/mnt/docs/Эталон_ИндексКБ_шаб.xlsx"
+    ui_timezone: str = "Europe/Moscow"  # e.g. Europe/Moscow
 
 
 settings = Settings()

@@ -1,0 +1,63 @@
+{% extends "base.html" %}
+{% block content %}
+  <div class="section-header">
+    <div>
+      <h2 style="margin:0">История версий</h2>
+      <div class="muted">
+        Организация: <span class="mono">{{ org.name }}</span> ·
+        Сокращенное: <span class="mono">{{ a.short_name }}</span> ·
+        Пункт: <span class="mono">{% if a.achievement_item_no %}{{ a.achievement_item_no }}{% else %}—{% endif %}</span>
+      </div>
+    </div>
+    <div class="row-right">
+      <a class="btn btn-secondary" href="{{ back_url }}">Назад</a>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="section-header">
+      <h3 style="margin:0">Артефакт</h3>
+      <div class="muted">{{ a.title }}</div>
+    </div>
+
+    <div class="table-wrap">
+      <table class="table">
+        <thead>
+          <tr>
+            <th>Версия</th>
+            <th>Файл</th>
+            <th>Дата загрузки</th>
+            <th>Кто загрузил</th>
+            <th class="th-actions-wide"></th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for v in versions %}
+            <tr>
+              <td class="mono">{{ v.version_no }}</td>
+              <td class="mono">{{ v.original_filename }}</td>
+              <td class="mono">{{ v.created_at|dt }}</td>
+              <td class="mono">{{ v.created_by_login or "—" }}</td>
+              <td class="td-actions-wide">
+                <div class="row-right">
+                  <a class="icon-btn" href="/auditor/org_artifacts/{{ oa.id }}/download?version={{ v.version_no }}" title="Скачать версию {{ v.version_no }}" aria-label="Скачать">
+                    <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" focusable="false">
+                      <path fill="currentColor" d="M5 20h14v-2H5v2zm7-18-5.5 5.5 1.42 1.42L11 6.84V16h2V6.84l3.08 3.08 1.42-1.42L12 2z"/>
+                    </svg>
+                  </a>
+                  {% if v.id == oa.current_file_version_id %}
+                    <span class="badge">Текущая</span>
+                  {% endif %}
+                </div>
+              </td>
+            </tr>
+          {% endfor %}
+          {% if versions|length == 0 %}
+            <tr><td colspan="5" class="muted">Версий нет.</td></tr>
+          {% endif %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+{% endblock %}
+
