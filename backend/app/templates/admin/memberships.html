@@ -18,28 +18,43 @@
     <form method="post" action="/admin/memberships" class="grid" style="grid-template-columns: repeat(3, minmax(0, 1fr)); align-items:end;">
       <div>
         <label>Пользователь</label>
-        <select name="user_id">
-          {% if system_users and system_users|length > 0 %}
-            <optgroup label="Системные">
-              {% for u in system_users %}
-                <option value="{{ u.id }}">{{ u.login }}</option>
-              {% endfor %}
-            </optgroup>
-          {% endif %}
-          <optgroup label="Пользователи организаций">
-            {% for u in users %}
-              <option value="{{ u.id }}">{{ u.login }}</option>
-            {% endfor %}
-          </optgroup>
-        </select>
+        <div class="combo" id="mem_user_combo">
+          <input id="mem_user_id" name="user_id" type="hidden" value="" />
+          <div class="combo-input-wrap">
+            <input
+              class="combo-input"
+              id="mem_user_input"
+              type="text"
+              autocomplete="off"
+              placeholder="Выберите пользователя…"
+              value=""
+            />
+            <span class="combo-caret" aria-hidden="true">▾</span>
+          </div>
+          <div class="combo-popover" id="mem_user_pop" hidden>
+            <div class="combo-list" id="mem_user_list" role="listbox"></div>
+          </div>
+        </div>
       </div>
       <div>
         <label>Организация</label>
-        <select name="org_id">
-          {% for o in orgs %}
-            <option value="{{ o.id }}">{{ o.name }}</option>
-          {% endfor %}
-        </select>
+        <div class="combo" id="mem_org_combo">
+          <input id="mem_org_id" name="org_id" type="hidden" value="" />
+          <div class="combo-input-wrap">
+            <input
+              class="combo-input"
+              id="mem_org_input"
+              type="text"
+              autocomplete="off"
+              placeholder="Выберите организацию…"
+              value=""
+            />
+            <span class="combo-caret" aria-hidden="true">▾</span>
+          </div>
+          <div class="combo-popover" id="mem_org_pop" hidden>
+            <div class="combo-list" id="mem_org_list" role="listbox"></div>
+          </div>
+        </div>
       </div>
       <div>
         <label>Роль</label>
@@ -53,6 +68,104 @@
         <button class="btn" type="submit">Назначить/обновить</button>
       </div>
     </form>
+    <script>
+      (function () {
+        function initCombo(cfg) {
+          const el = document.getElementById(cfg.comboId);
+          const pop = document.getElementById(cfg.popId);
+          const inp = document.getElementById(cfg.inputId);
+          const list = document.getElementById(cfg.listId);
+          const hid = document.getElementById(cfg.hiddenId);
+          if (!el || !pop || !inp || !list || !hid) return;
+
+          function open() {
+            pop.hidden = false;
+            render(inp.value || "");
+          }
+          function close() {
+            pop.hidden = true;
+          }
+          function isOpen() {
+            return pop.hidden === false;
+          }
+
+          function setSelected(id, label) {
+            hid.value = id || "";
+            inp.value = label || "";
+            close();
+          }
+
+          function render(q) {
+            const query = (q || "").trim().toLowerCase();
+            const items = query
+              ? cfg.items.filter(it => (it.label || "").toLowerCase().includes(query))
+              : cfg.items;
+
+            list.innerHTML = "";
+            const cur = String(hid.value || "");
+            for (const it of items) {
+              const row = document.createElement("div");
+              row.className = "combo-option" + (String(it.id) === cur ? " combo-option--active" : "");
+              row.setAttribute("role", "option");
+              row.setAttribute("aria-selected", String(it.id) === cur ? "true" : "false");
+              row.textContent = it.label;
+              row.addEventListener("mousedown", (e) => {
+                e.preventDefault();
+                setSelected(String(it.id || ""), it.label);
+              });
+              list.appendChild(row);
+            }
+          }
+
+          inp.addEventListener("focus", open);
+          inp.addEventListener("click", open);
+          inp.addEventListener("input", function () {
+            // пока пользователь печатает руками — selection сбрасываем до клика по опции
+            hid.value = "";
+            open();
+          });
+          inp.addEventListener("keydown", function (e) {
+            if (e.key === "Escape") {
+              e.preventDefault();
+              close();
+            }
+          });
+          document.addEventListener("click", function (e) {
+            if (!isOpen()) return;
+            if (!el.contains(e.target)) close();
+          });
+        }
+
+        initCombo({
+          comboId: "mem_user_combo",
+          popId: "mem_user_pop",
+          inputId: "mem_user_input",
+          listId: "mem_user_list",
+          hiddenId: "mem_user_id",
+          items: [
+            {% for u in system_users %}
+              { id: "{{ u.id }}", label: {{ u.login|tojson }} },
+            {% endfor %}
+            {% for u in users %}
+              { id: "{{ u.id }}", label: {{ u.login|tojson }} },
+            {% endfor %}
+          ],
+        });
+
+        initCombo({
+          comboId: "mem_org_combo",
+          popId: "mem_org_pop",
+          inputId: "mem_org_input",
+          listId: "mem_org_list",
+          hiddenId: "mem_org_id",
+          items: [
+            {% for o in orgs %}
+              { id: "{{ o.id }}", label: {{ o.name|tojson }} },
+            {% endfor %}
+          ],
+        });
+      })();
+    </script>
   </div>
 
   <div class="card">

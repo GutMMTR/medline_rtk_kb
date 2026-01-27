@@ -143,12 +143,28 @@ def main() -> int:
                 db.add(fv)
                 db.flush()
 
-                before = {"status": oa.status.value, "current_file_version_id": oa.current_file_version_id}
+                before = {
+                    "status": oa.status.value,
+                    "current_file_version_id": oa.current_file_version_id,
+                    "audited_file_version_id": getattr(oa, "audited_file_version_id", None),
+                    "audited_at": getattr(oa, "audited_at", None).isoformat() if getattr(oa, "audited_at", None) else None,
+                    "audited_by_user_id": getattr(oa, "audited_by_user_id", None),
+                }
                 oa.status = OrgArtifactStatus.uploaded
                 oa.current_file_version_id = fv.id
                 oa.updated_at = datetime.utcnow()
                 oa.updated_by_user_id = actor.id
-                after = {"status": oa.status.value, "current_file_version_id": oa.current_file_version_id}
+                # New version => audit reset
+                oa.audited_file_version_id = None
+                oa.audited_at = None
+                oa.audited_by_user_id = None
+                after = {
+                    "status": oa.status.value,
+                    "current_file_version_id": oa.current_file_version_id,
+                    "audited_file_version_id": getattr(oa, "audited_file_version_id", None),
+                    "audited_at": getattr(oa, "audited_at", None),
+                    "audited_by_user_id": getattr(oa, "audited_by_user_id", None),
+                }
 
                 write_audit_log(
                     db,

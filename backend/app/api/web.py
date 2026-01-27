@@ -3,7 +3,10 @@ from __future__ import annotations
 import hashlib
 import io
 import os
+import subprocess
+import tempfile
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Dict, Tuple
 from urllib.parse import quote, urlencode
 from datetime import timedelta
@@ -20,9 +23,13 @@ from app.audit.service import write_audit_log
 from app.auth.dependencies import get_current_user, get_user_role_for_org, require_admin
 from app.auth.security import JWT_COOKIE_NAME, create_access_token, hash_password, verify_password
 from app.core.config import settings
+import json
+
 from app.db.models import (
     Artifact,
     ArtifactNode,
+    AuditLog,
+    FilePreview,
     FileVersion,
     NextcloudIntegrationSettings,
     NextcloudRemoteFileState,
@@ -254,38 +261,25 @@ def my_artifacts_page(
     short_name: str | None = None,
     q: str | None = None,
     status: str | None = None,
+    audit: str | None = None,
     page: int = 1,
     page_size: int = 50,
 ) -> HTMLResponse:
-    # Доступные организации для пользователя (customer видит только свои).
-    is_global_auditor = (
-        db.query(UserOrgMembership)
-        .filter(UserOrgMembership.user_id == user.id, UserOrgMembership.role == Role.auditor)
-        .first()
-        is not None
+    # Customer UI: показываем только организации, где у пользователя роль customer.
+    orgs = (
+        db.query(Organization)
+        .join(UserOrgMembership, UserOrgMembership.org_id == Organization.id)
+        .filter(UserOrgMembership.user_id == user.id, UserOrgMembership.role == Role.customer)
+        .order_by(Organization.name.asc())
+        .all()
     )
-    if user.is_admin or is_global_auditor:
-        orgs = db.query(Organization).order_by(Organization.name.asc()).all()
-    else:
-        orgs = (
-            db.query(Organization)
-            .join(UserOrgMembership, UserOrgMembership.org_id == Organization.id)
-            .filter(UserOrgMembership.user_id == user.id)
-            .order_by(Organization.name.asc())
-            .all()
-        )
     if not orgs:
-        return templates.TemplateResponse(
-            "empty.html",
-            {"request": request, "user": user, "message": "Нет доступных организаций. Обратитесь к администратору."},
-        )
+        raise HTTPException(status_code=403, detail="Страница доступна только роли customer")
 
-    # Customer: организация зафиксирована (параметр org_id игнорируем).
-    selected_org_id = orgs[0].id
-    role = get_user_role_for_org(db, user, selected_org_id)
-    if role != Role.customer or len(orgs) != 1:
-        # Если у пользователя больше одной организации — это уже не "customer" модель, пусть админ настроит роли.
-        raise HTTPException(status_code=403, detail="Страница доступна только роли customer (одна организация)")
+    # Support multi-org customers via org_id selector
+    selected_org_id = org_id or orgs[0].id
+    if selected_org_id not in {o.id for o in orgs}:
+        selected_org_id = orgs[0].id
 
     page = max(int(page or 1), 1)
     page_size = int(page_size or 50)
@@ -331,7 +325,31 @@ def my_artifacts_page(
         list_count_q = list_count_q.filter(OrgArtifact.status == OrgArtifactStatus(status_filter))
     total = list_count_q.count()
 
+    audit_filter = (audit or "").strip().lower() or ""
+    if audit_filter not in ("needs", "audited", "changed", ""):
+        audit_filter = ""
+    if audit_filter:
+        if audit_filter == "needs":
+            list_count_q = list_count_q.filter(
+                OrgArtifact.current_file_version_id.isnot(None),
+                OrgArtifact.audited_file_version_id.is_(None),
+            )
+        elif audit_filter == "audited":
+            list_count_q = list_count_q.filter(
+                OrgArtifact.current_file_version_id.isnot(None),
+                OrgArtifact.audited_file_version_id.isnot(None),
+                OrgArtifact.audited_file_version_id == OrgArtifact.current_file_version_id,
+            )
+        elif audit_filter == "changed":
+            list_count_q = list_count_q.filter(
+                OrgArtifact.current_file_version_id.isnot(None),
+                OrgArtifact.audited_file_version_id.isnot(None),
+                OrgArtifact.audited_file_version_id != OrgArtifact.current_file_version_id,
+            )
+        total = list_count_q.count()
+
     CommentBy = aliased(User)
+    AuditedBy = aliased(User)
     # latest comment per org_artifact (auditor comment visible to customer)
     sub = (
         db.query(
@@ -349,20 +367,61 @@ def my_artifacts_page(
     )
 
     query = (
-        db.query(OrgArtifact, Artifact, FileVersion, latest_comment.c.comment_text, latest_comment.c.created_at, CommentBy)
+        db.query(
+            OrgArtifact,
+            Artifact,
+            FileVersion,
+            latest_comment.c.comment_text,
+            latest_comment.c.created_at,
+            CommentBy,
+            AuditedBy,
+        )
         .join(Artifact, Artifact.id == OrgArtifact.artifact_id)
         .outerjoin(FileVersion, FileVersion.id == OrgArtifact.current_file_version_id)
         .outerjoin(latest_comment, latest_comment.c.org_artifact_id == OrgArtifact.id)
         .outerjoin(CommentBy, CommentBy.id == latest_comment.c.author_user_id)
+        .outerjoin(AuditedBy, AuditedBy.id == OrgArtifact.audited_by_user_id)
         .filter(*filters)
         .order_by(Artifact.topic.asc(), Artifact.domain.asc(), Artifact.short_name.asc(), Artifact.achievement_item_no.asc().nullsfirst())
     )
     if status_filter:
         query = query.filter(OrgArtifact.status == OrgArtifactStatus(status_filter))
+    if audit_filter:
+        if audit_filter == "needs":
+            query = query.filter(
+                OrgArtifact.current_file_version_id.isnot(None),
+                OrgArtifact.audited_file_version_id.is_(None),
+            )
+        elif audit_filter == "audited":
+            query = query.filter(
+                OrgArtifact.current_file_version_id.isnot(None),
+                OrgArtifact.audited_file_version_id.isnot(None),
+                OrgArtifact.audited_file_version_id == OrgArtifact.current_file_version_id,
+            )
+        elif audit_filter == "changed":
+            query = query.filter(
+                OrgArtifact.current_file_version_id.isnot(None),
+                OrgArtifact.audited_file_version_id.isnot(None),
+                OrgArtifact.audited_file_version_id != OrgArtifact.current_file_version_id,
+            )
 
     offset = (page - 1) * page_size
     rows = []
-    for (oa, a, fv, c_text, c_at, c_by) in query.offset(offset).limit(page_size).all():
+    for (oa, a, fv, c_text, c_at, c_by, audited_by) in query.offset(offset).limit(page_size).all():
+        # UI-friendly audit badge (prevents template drift)
+        if not oa.current_file_version_id:
+            audit_label = "—"
+            audit_class = "badge badge-neutral"
+        elif oa.audited_file_version_id and oa.audited_file_version_id == oa.current_file_version_id:
+            audit_label = "Проаудировано"
+            audit_class = "badge badge-info"
+        elif oa.audited_file_version_id:
+            audit_label = "Изменён"
+            audit_class = "badge badge-warn"
+        else:
+            audit_label = "Требует аудита"
+            audit_class = "badge badge-warn"
+
         rows.append(
             {
                 "oa": oa,
@@ -371,6 +430,9 @@ def my_artifacts_page(
                 "comment_text": c_text or "",
                 "comment_at": c_at,
                 "comment_by": c_by.login if c_by else "",
+                "audited_by": audited_by.login if audited_by else "",
+                "audit_label": audit_label,
+                "audit_class": audit_class,
             }
         )
 
@@ -386,12 +448,14 @@ def my_artifacts_page(
     # Базовый querystring для пагинации (фильтры + page_size), без org_id.
     base_query = urlencode(
         {
+            "org_id": str(selected_org_id),
             "topic": topic or "",
             "domain": domain or "",
             "kb_level": kb_level or "",
             "short_name": short_name or "",
             "q": q or "",
             "status": status_filter,
+            "audit": audit_filter,
             "page_size": str(page_size),
         }
     )
@@ -408,7 +472,8 @@ def my_artifacts_page(
             "request": request,
             "user": user,
             "container_class": "container-wide",
-            "org_name": orgs[0].name,
+            "orgs": orgs,
+            "org_name": next((o.name for o in orgs if o.id == selected_org_id), orgs[0].name),
             "selected_org_id": selected_org_id,
             "rows": rows,
             "max_upload_mb": settings.max_upload_mb,
@@ -418,6 +483,7 @@ def my_artifacts_page(
             "short_name": short_name,
             "q": q,
             "status": status_filter,
+            "audit": audit_filter,
             "topics": topics,
             "domains": domains,
             "kb_levels": kb_levels,
@@ -439,22 +505,23 @@ def my_artifacts_page(
     return resp
 
 
-def _get_customer_single_org(db: Session, user: User) -> Organization:
-    orgs = (
+def _get_customer_orgs(db: Session, user: User) -> list[Organization]:
+    return (
         db.query(Organization)
         .join(UserOrgMembership, UserOrgMembership.org_id == Organization.id)
-        .filter(UserOrgMembership.user_id == user.id)
+        .filter(UserOrgMembership.user_id == user.id, UserOrgMembership.role == Role.customer)
         .order_by(Organization.name.asc())
         .all()
     )
+
+
+def _get_customer_selected_org(db: Session, user: User, org_id: int | None) -> tuple[list[Organization], Organization]:
+    orgs = _get_customer_orgs(db, user)
     if not orgs:
-        raise HTTPException(status_code=403, detail="Нет доступных организаций")
-    if len(orgs) != 1:
-        raise HTTPException(status_code=403, detail="Для customer ожидается ровно одна организация")
-    role = get_user_role_for_org(db, user, orgs[0].id)
-    if role != Role.customer:
         raise HTTPException(status_code=403, detail="Недостаточно прав")
-    return orgs[0]
+    selected_id = org_id or orgs[0].id
+    selected = next((o for o in orgs if o.id == selected_id), None) or orgs[0]
+    return orgs, selected
 
 
 def _split_short_name(sn: str) -> list[str]:
@@ -466,21 +533,52 @@ def my_files_explorer(
     request: Request,
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
+    org_id: int | None = None,
     path: str | None = None,
 ) -> HTMLResponse:
-    org = _get_customer_single_org(db, user)
+    orgs, org = _get_customer_selected_org(db, user, org_id)
     _ensure_org_artifacts_materialized(db, org.id)
     db.commit()
 
     # Берём все артефакты этой организации (MVP: до нескольких тысяч) и строим дерево путей по short_name.
     CreatedBy = aliased(User)
     UpdatedBy = aliased(User)
+    CommentBy = aliased(User)
+    AuditedBy = aliased(User)
+
+    sub = (
+        db.query(
+            OrgArtifactComment.org_artifact_id.label("oa_id"),
+            func.max(OrgArtifactComment.created_at).label("max_created_at"),
+        )
+        .filter(OrgArtifactComment.org_id == org.id)
+        .group_by(OrgArtifactComment.org_artifact_id)
+        .subquery()
+    )
+    latest_comment = (
+        db.query(OrgArtifactComment)
+        .join(sub, and_(OrgArtifactComment.org_artifact_id == sub.c.oa_id, OrgArtifactComment.created_at == sub.c.max_created_at))
+        .subquery()
+    )
     rows = (
-        db.query(OrgArtifact, Artifact, FileVersion, CreatedBy, UpdatedBy)
+        db.query(
+            OrgArtifact,
+            Artifact,
+            FileVersion,
+            CreatedBy,
+            UpdatedBy,
+            latest_comment.c.comment_text,
+            latest_comment.c.created_at,
+            CommentBy,
+            AuditedBy,
+        )
         .join(Artifact, Artifact.id == OrgArtifact.artifact_id)
         .outerjoin(FileVersion, FileVersion.id == OrgArtifact.current_file_version_id)
         .outerjoin(CreatedBy, CreatedBy.id == FileVersion.created_by_user_id)
         .outerjoin(UpdatedBy, UpdatedBy.id == OrgArtifact.updated_by_user_id)
+        .outerjoin(latest_comment, latest_comment.c.org_artifact_id == OrgArtifact.id)
+        .outerjoin(CommentBy, CommentBy.id == latest_comment.c.author_user_id)
+        .outerjoin(AuditedBy, AuditedBy.id == OrgArtifact.audited_by_user_id)
         .filter(OrgArtifact.org_id == org.id)
         .all()
     )
@@ -492,7 +590,7 @@ def my_files_explorer(
     # Вычисляем "детей" текущей директории.
     subfolders: dict[str, int] = {}
     leaf_items: list[dict] = []
-    for (oa, a, fv, created_by, updated_by) in rows:
+    for (oa, a, fv, created_by, updated_by, c_text, c_at, c_by, audited_by) in rows:
         segs = _split_short_name(a.short_name)
         if not segs:
             continue
@@ -502,6 +600,19 @@ def my_files_explorer(
             nxt = segs[len(cur_segments)]
             subfolders[nxt] = subfolders.get(nxt, 0) + 1
         else:
+            if not oa.current_file_version_id:
+                audit_label = "—"
+                audit_class = "badge badge-neutral"
+            elif oa.audited_file_version_id and oa.audited_file_version_id == oa.current_file_version_id:
+                audit_label = "Проаудировано"
+                audit_class = "badge badge-info"
+            elif oa.audited_file_version_id:
+                audit_label = "Изменён"
+                audit_class = "badge badge-warn"
+            else:
+                audit_label = "Требует аудита"
+                audit_class = "badge badge-warn"
+
             leaf_items.append(
                 {
                     "oa": oa,
@@ -509,6 +620,12 @@ def my_files_explorer(
                     "fv": fv,
                     "uploaded_by": created_by.login if created_by else "",
                     "updated_by": updated_by.login if updated_by else "",
+                    "comment_text": c_text or "",
+                    "comment_at": c_at,
+                    "comment_by": c_by.login if c_by else "",
+                    "audited_by": audited_by.login if audited_by else "",
+                    "audit_label": audit_label,
+                    "audit_class": audit_class,
                 }
             )
 
@@ -529,7 +646,9 @@ def my_files_explorer(
             "request": request,
             "user": user,
             "container_class": "container-wide",
+            "orgs": orgs,
             "org_name": org.name,
+            "selected_org_id": org.id,
             "path": path,
             "crumbs": crumbs,
             "folders": folders_sorted,
@@ -647,12 +766,33 @@ def auditor_artifacts_page(
     completion_pct = int(round((completion_uploaded * 100.0 / completion_total), 0)) if completion_total else 0
 
     status_filter = (status or "").strip().lower() or ""
-    if status_filter not in ("uploaded", "missing", ""):
+    if status_filter not in ("uploaded", "missing", "changed", "audited", ""):
         status_filter = ""
 
     list_count_q = base_count_q
     if status_filter:
-        list_count_q = list_count_q.filter(OrgArtifact.status == OrgArtifactStatus(status_filter))
+        if status_filter in ("missing", "uploaded"):
+            if status_filter == "missing":
+                list_count_q = list_count_q.filter(OrgArtifact.status == OrgArtifactStatus.missing)
+            else:
+                # "uploaded" in UI == "требует аудита" (файл есть, но ещё не проаудирован)
+                list_count_q = list_count_q.filter(
+                    OrgArtifact.status == OrgArtifactStatus.uploaded,
+                    OrgArtifact.current_file_version_id.isnot(None),
+                    OrgArtifact.audited_file_version_id.is_(None),
+                )
+        elif status_filter == "audited":
+            list_count_q = list_count_q.filter(
+                OrgArtifact.current_file_version_id.isnot(None),
+                OrgArtifact.audited_file_version_id.isnot(None),
+                OrgArtifact.audited_file_version_id == OrgArtifact.current_file_version_id,
+            )
+        elif status_filter == "changed":
+            list_count_q = list_count_q.filter(
+                OrgArtifact.current_file_version_id.isnot(None),
+                OrgArtifact.audited_file_version_id.isnot(None),
+                OrgArtifact.audited_file_version_id != OrgArtifact.current_file_version_id,
+            )
     total = list_count_q.count()
 
     query = (
@@ -667,7 +807,27 @@ def auditor_artifacts_page(
         .order_by(Artifact.topic.asc(), Artifact.domain.asc(), Artifact.short_name.asc(), Artifact.achievement_item_no.asc().nullsfirst())
     )
     if status_filter:
-        query = query.filter(OrgArtifact.status == OrgArtifactStatus(status_filter))
+        if status_filter in ("missing", "uploaded"):
+            if status_filter == "missing":
+                query = query.filter(OrgArtifact.status == OrgArtifactStatus.missing)
+            else:
+                query = query.filter(
+                    OrgArtifact.status == OrgArtifactStatus.uploaded,
+                    OrgArtifact.current_file_version_id.isnot(None),
+                    OrgArtifact.audited_file_version_id.is_(None),
+                )
+        elif status_filter == "audited":
+            query = query.filter(
+                OrgArtifact.current_file_version_id.isnot(None),
+                OrgArtifact.audited_file_version_id.isnot(None),
+                OrgArtifact.audited_file_version_id == OrgArtifact.current_file_version_id,
+            )
+        elif status_filter == "changed":
+            query = query.filter(
+                OrgArtifact.current_file_version_id.isnot(None),
+                OrgArtifact.audited_file_version_id.isnot(None),
+                OrgArtifact.audited_file_version_id != OrgArtifact.current_file_version_id,
+            )
 
     offset = (page - 1) * page_size
     rows = []
@@ -763,6 +923,7 @@ def auditor_add_comment(
     request: Request,
     org_id: int = Form(...),
     comment: str = Form(""),
+    back: str = Form(""),
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ) -> Response:
@@ -788,10 +949,68 @@ def auditor_add_comment(
         )
         db.commit()
 
-    ref = request.headers.get("referer") or f"/auditor/artifacts?org_id={org_id}"
+    # Prefer explicit back (sent by form), fallback to referer.
+    ref = (back or "").strip() or (request.headers.get("referer") or f"/auditor/artifacts?org_id={org_id}")
     # безопасный редирект только на относительный путь
-    if "://" in ref:
+    if not ref or "://" in ref or not ref.startswith("/"):
         ref = f"/auditor/artifacts?org_id={org_id}"
+    return _redirect(ref)
+
+
+@router.post("/auditor/org_artifacts/{org_artifact_id}/audit")
+def auditor_mark_audited(
+    org_artifact_id: int,
+    request: Request,
+    back: str = Form(""),
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> Response:
+    oa = db.get(OrgArtifact, org_artifact_id)
+    if not oa:
+        raise HTTPException(status_code=404, detail="Артефакт организации не найден")
+    role = get_user_role_for_org(db, user, oa.org_id)
+    if role not in (Role.auditor, Role.admin):
+        raise HTTPException(status_code=403, detail="Требуются права auditor/admin")
+    if not oa.current_file_version_id:
+        raise HTTPException(status_code=400, detail="Нет файла для аудита")
+
+    now = datetime.utcnow()
+    before = {
+        "audited_file_version_id": oa.audited_file_version_id,
+        "audited_at": oa.audited_at.isoformat() if oa.audited_at else None,
+        "audited_by_user_id": oa.audited_by_user_id,
+        "current_file_version_id": oa.current_file_version_id,
+    }
+
+    oa.audited_file_version_id = oa.current_file_version_id
+    oa.audited_at = now
+    oa.audited_by_user_id = user.id
+    oa.updated_at = now
+    oa.updated_by_user_id = user.id
+
+    after = {
+        "audited_file_version_id": oa.audited_file_version_id,
+        "audited_at": oa.audited_at.isoformat() if oa.audited_at else None,
+        "audited_by_user_id": oa.audited_by_user_id,
+        "current_file_version_id": oa.current_file_version_id,
+    }
+
+    write_audit_log(
+        db,
+        actor=user,
+        org_id=oa.org_id,
+        action="audit",
+        entity_type="org_artifact",
+        entity_id=str(oa.id),
+        before=before,
+        after=after,
+        request=request,
+    )
+    db.commit()
+
+    ref = (back or "").strip() or (request.headers.get("referer") or "")
+    if not ref or "://" in ref or not ref.startswith("/"):
+        ref = f"/auditor/artifacts?org_id={oa.org_id}"
     return _redirect(ref)
 
 
@@ -966,6 +1185,136 @@ def auditor_artifacts_export_xlsx(
     )
 
 
+def _download_content_disposition(filename_utf8: str, *, fallback_prefix: str = "download") -> str:
+    """
+    Build RFC5987-compatible Content-Disposition header.
+    Starlette encodes headers as latin-1, so `filename=` must be ASCII.
+    We provide UTF-8 via `filename*=` for browsers that support it.
+    """
+    name = (filename_utf8 or "").strip() or fallback_prefix
+    ext = Path(name).suffix
+    if ext and len(ext) <= 10:
+        ascii_name = f"{fallback_prefix}{ext}"
+    else:
+        ascii_name = fallback_prefix
+    return f'attachment; filename="{ascii_name}"; filename*=UTF-8\'\'{quote(name)}'
+
+
+def _inline_content_disposition(filename_utf8: str, *, fallback_prefix: str = "inline") -> str:
+    """
+    Like _download_content_disposition, but for inline viewing (browser preview).
+    """
+    cd = _download_content_disposition(filename_utf8, fallback_prefix=fallback_prefix)
+    if cd.lower().startswith("attachment;"):
+        return "inline;" + cd[len("attachment;") :]
+    return cd.replace("attachment", "inline", 1)
+
+
+_OFFICE_EXTS = {".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx"}
+
+
+def _is_office_file(filename: str, content_type: str) -> bool:
+    ext = Path((filename or "").strip()).suffix.lower()
+    if ext in _OFFICE_EXTS:
+        return True
+    ct = (content_type or "").lower()
+    if ct.startswith("application/vnd.openxmlformats-officedocument."):
+        return True
+    if ct in ("application/msword", "application/vnd.ms-excel", "application/vnd.ms-powerpoint"):
+        return True
+    return False
+
+
+def _get_or_build_pdf_preview(db: Session, fv: FileVersion) -> tuple[bytes, str]:
+    """
+    Return (pdf_bytes, error_message). error_message == "" when ok.
+    Caches result in file_previews.
+    """
+    if not fv or not fv.blob:
+        return b"", "Файл не найден"
+
+    prev = db.query(FilePreview).filter(FilePreview.file_version_id == fv.id).one_or_none()
+    if prev and prev.preview_blob and not prev.last_error:
+        return prev.preview_blob, ""
+
+    # Avoid tight failure loops (e.g. broken file) — backoff 2 minutes
+    if prev and prev.last_error and prev.last_error_at:
+        age_s = (datetime.utcnow() - prev.last_error_at.replace(tzinfo=None)).total_seconds()
+        if age_s < 120:
+            return b"", f"Превью временно недоступно (повторите позже): {prev.last_error}"
+
+    in_name = (fv.original_filename or "").strip() or "file"
+    ext = Path(in_name).suffix.lower() or ".bin"
+    if ext not in _OFFICE_EXTS:
+        # Ensure LO gets a sane extension
+        ext = ".docx"
+
+    try:
+        with tempfile.TemporaryDirectory(prefix="preview_") as td:
+            td_path = Path(td)
+            in_path = td_path / f"input{ext}"
+            in_path.write_bytes(fv.blob)
+
+            cmd = [
+                "soffice",
+                "--headless",
+                "--nologo",
+                "--nolockcheck",
+                "--norestore",
+                "--nodefault",
+                "--convert-to",
+                "pdf",
+                "--outdir",
+                str(td_path),
+                str(in_path),
+            ]
+            env = os.environ.copy()
+            env.setdefault("HOME", "/tmp")
+            res = subprocess.run(cmd, capture_output=True, text=True, timeout=60, env=env)
+            if res.returncode != 0:
+                msg = (res.stderr or res.stdout or "LibreOffice conversion failed").strip()
+                msg = " ".join(msg.split())[:400]
+                raise RuntimeError(msg)
+
+            out_path = td_path / (in_path.stem + ".pdf")
+            if not out_path.exists():
+                pdfs = list(td_path.glob("*.pdf"))
+                out_path = pdfs[0] if pdfs else out_path
+            if not out_path.exists():
+                raise RuntimeError("Не удалось получить PDF после конвертации")
+
+            pdf_bytes = out_path.read_bytes()
+            if not pdf_bytes:
+                raise RuntimeError("Пустой PDF после конвертации")
+
+            sha = hashlib.sha256(pdf_bytes).hexdigest()
+            if not prev:
+                prev = FilePreview(file_version_id=fv.id)
+                db.add(prev)
+            prev.preview_mime = "application/pdf"
+            prev.preview_blob = pdf_bytes
+            prev.preview_size_bytes = len(pdf_bytes)
+            prev.preview_sha256 = sha
+            prev.last_error = ""
+            prev.last_error_at = None
+            prev.created_at = datetime.utcnow()
+            db.flush()
+            return pdf_bytes, ""
+    except Exception as e:
+        msg = str(e).strip()
+        msg = " ".join(msg.split())[:400]
+        if not prev:
+            prev = FilePreview(file_version_id=fv.id)
+            db.add(prev)
+        prev.preview_blob = None
+        prev.preview_size_bytes = 0
+        prev.preview_sha256 = ""
+        prev.last_error = msg or "Ошибка конвертации"
+        prev.last_error_at = datetime.utcnow()
+        db.flush()
+        return b"", prev.last_error
+
+
 def _require_auditor_or_admin_for_org(db: Session, user: User, org_id: int) -> None:
     role = get_user_role_for_org(db, user, org_id)
     if role not in (Role.auditor, Role.admin):
@@ -991,6 +1340,7 @@ def auditor_files_explorer(
     _require_auditor_or_admin_for_org(db, user, selected_org_id)
     role = get_user_role_for_org(db, user, selected_org_id)
     can_delete_files = role == Role.admin
+    can_view_history = role in (Role.admin, Role.auditor)
     current_url = request.url.path + (f"?{request.url.query}" if request.url.query else "")
 
     _ensure_org_artifacts_materialized(db, selected_org_id)
@@ -1051,6 +1401,7 @@ def auditor_files_explorer(
             "orgs": orgs,
             "selected_org_id": selected_org_id,
             "can_delete_files": can_delete_files,
+            "can_view_history": can_view_history,
             "current_url": current_url,
             "path": path,
             "crumbs": crumbs,
@@ -1218,9 +1569,9 @@ def auditor_download_current_file(
     role = get_user_role_for_org(db, user, oa.org_id)
     if role not in (Role.auditor, Role.admin):
         raise HTTPException(status_code=403, detail="Требуются права auditor/admin")
-    # История версий доступна только админу: auditor видит/скачивает только текущую версию
-    if version is not None and role != Role.admin:
-        raise HTTPException(status_code=403, detail="История версий доступна только админу")
+    # История версий доступна аудитору и админу.
+    if version is not None and role not in (Role.admin, Role.auditor):
+        raise HTTPException(status_code=403, detail="История версий недоступна")
 
     qv = db.query(FileVersion).filter(FileVersion.org_artifact_id == oa.id)
     if version is not None:
@@ -1230,8 +1581,353 @@ def auditor_download_current_file(
     if not fv or not fv.blob:
         raise HTTPException(status_code=404, detail="Файл не найден")
 
-    headers = {"Content-Disposition": f'attachment; filename="{fv.original_filename}"'}
+    headers = {"Content-Disposition": _download_content_disposition(fv.original_filename, fallback_prefix="artifact")}
     return Response(content=fv.blob, media_type=fv.content_type, headers=headers)
+
+
+@router.get("/auditor/org_artifacts/{org_artifact_id}/content")
+def auditor_view_content(
+    org_artifact_id: int,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+    version: int | None = None,
+    mode: str | None = None,
+) -> Response:
+    oa = db.get(OrgArtifact, org_artifact_id)
+    if not oa:
+        raise HTTPException(status_code=404, detail="Артефакт организации не найден")
+    role = get_user_role_for_org(db, user, oa.org_id)
+    if role not in (Role.auditor, Role.admin):
+        raise HTTPException(status_code=403, detail="Требуются права auditor/admin")
+
+    qv = db.query(FileVersion).filter(FileVersion.org_artifact_id == oa.id)
+    if version is not None:
+        fv = qv.filter(FileVersion.version_no == version).one_or_none()
+    else:
+        fv = db.get(FileVersion, oa.current_file_version_id) if oa.current_file_version_id else qv.order_by(FileVersion.version_no.desc()).first()
+    if not fv or not fv.blob:
+        raise HTTPException(status_code=404, detail="Файл не найден")
+
+    # mode=preview -> generate PDF preview for MS Office formats
+    if (mode or "").lower() == "preview":
+        if not _is_office_file(fv.original_filename or "", fv.content_type or ""):
+            # for non-office just return inline original
+            headers = {
+                "Content-Disposition": _inline_content_disposition(fv.original_filename, fallback_prefix="artifact"),
+                "Cache-Control": "no-store, max-age=0",
+                "Pragma": "no-cache",
+            }
+            return Response(content=fv.blob, media_type=fv.content_type, headers=headers)
+
+        pdf_bytes, err = _get_or_build_pdf_preview(db, fv)
+        db.commit()
+        if err or not pdf_bytes:
+            raise HTTPException(status_code=503, detail=f"Превью недоступно: {err or 'ошибка конвертации'}")
+        headers = {
+            "Content-Disposition": _inline_content_disposition((fv.original_filename or "preview") + ".pdf", fallback_prefix="preview"),
+            "Cache-Control": "no-store, max-age=0",
+            "Pragma": "no-cache",
+        }
+        return Response(content=pdf_bytes, media_type="application/pdf", headers=headers)
+
+    headers = {
+        "Content-Disposition": _inline_content_disposition(fv.original_filename, fallback_prefix="artifact"),
+        "Cache-Control": "no-store, max-age=0",
+        "Pragma": "no-cache",
+    }
+    return Response(content=fv.blob, media_type=fv.content_type, headers=headers)
+
+
+@router.get("/auditor/org_artifacts/{org_artifact_id}/view", response_class=HTMLResponse)
+def auditor_org_artifact_view_page(
+    org_artifact_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+    back: str | None = None,
+    version: int | None = None,
+) -> HTMLResponse:
+    oa = db.get(OrgArtifact, org_artifact_id)
+    if not oa:
+        raise HTTPException(status_code=404, detail="Артефакт организации не найден")
+    role = get_user_role_for_org(db, user, oa.org_id)
+    if role not in (Role.admin, Role.auditor):
+        raise HTTPException(status_code=403, detail="Требуются права auditor/admin")
+    a = db.get(Artifact, oa.artifact_id)
+    org = db.get(Organization, oa.org_id)
+    if not a or not org:
+        raise HTTPException(status_code=404, detail="Данные не найдены")
+
+    qv = db.query(FileVersion).filter(FileVersion.org_artifact_id == oa.id)
+    if version is not None:
+        fv = qv.filter(FileVersion.version_no == version).one_or_none()
+    else:
+        fv = db.get(FileVersion, oa.current_file_version_id) if oa.current_file_version_id else qv.order_by(FileVersion.version_no.desc()).first()
+
+    content_url = None
+    viewer_kind = "none"
+    content_type = ""
+    filename = ""
+    preview_error = ""
+    if fv and fv.blob:
+        content_type = (fv.content_type or "").lower()
+        filename = fv.original_filename or ""
+        base_qs = (f"version={fv.version_no}" if version is not None else "")
+        content_url = f"/auditor/org_artifacts/{oa.id}/content" + (f"?{base_qs}" if base_qs else "")
+        if "application/pdf" in content_type:
+            viewer_kind = "pdf"
+        elif content_type.startswith("image/"):
+            viewer_kind = "image"
+        elif content_type.startswith("audio/"):
+            viewer_kind = "audio"
+        elif content_type.startswith("video/"):
+            viewer_kind = "video"
+        elif content_type.startswith("text/") or content_type in ("application/json", "application/xml"):
+            viewer_kind = "text"
+        elif _is_office_file(filename, content_type):
+            # Try to build preview proactively, so the page shows a friendly message on failure
+            _, err = _get_or_build_pdf_preview(db, fv)
+            db.commit()
+            if err:
+                viewer_kind = "unknown"
+                preview_error = err
+                content_url = None
+            else:
+                viewer_kind = "pdf"
+                qs = base_qs + ("&" if base_qs else "") + "mode=preview"
+                content_url = f"/auditor/org_artifacts/{oa.id}/content?{qs}"
+        else:
+            viewer_kind = "unknown"
+
+    back_url = back or (request.headers.get("referer") or f"/auditor/artifacts?org_id={oa.org_id}")
+    if "://" in back_url:
+        back_url = f"/auditor/artifacts?org_id={oa.org_id}"
+
+    resp = templates.TemplateResponse(
+        "auditor_org_artifact_view.html",
+        {
+            "request": request,
+            "user": user,
+            "container_class": "container-wide",
+            "oa": oa,
+            "a": a,
+            "org": org,
+            "fv": fv,
+            "viewer_kind": viewer_kind,
+            "content_url": content_url,
+            "content_type": content_type,
+            "filename": filename,
+            "preview_error": preview_error,
+            "back_url": back_url,
+            "current_url": request.url.path + (f"?{request.url.query}" if request.url.query else ""),
+        },
+    )
+    resp.headers["Cache-Control"] = "no-store, max-age=0"
+    resp.headers["Pragma"] = "no-cache"
+    return resp
+
+
+@router.get("/auditor/org_artifacts/{org_artifact_id}/history", response_class=HTMLResponse)
+def auditor_org_artifact_history_page(
+    org_artifact_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+    back: str | None = None,
+) -> HTMLResponse:
+    oa = db.get(OrgArtifact, org_artifact_id)
+    if not oa:
+        raise HTTPException(status_code=404, detail="Артефакт организации не найден")
+    role = get_user_role_for_org(db, user, oa.org_id)
+    if role not in (Role.admin, Role.auditor):
+        raise HTTPException(status_code=403, detail="Требуются права auditor/admin")
+    a = db.get(Artifact, oa.artifact_id)
+    org = db.get(Organization, oa.org_id)
+    if not a or not org:
+        raise HTTPException(status_code=404, detail="Данные не найдены")
+
+    CreatedBy = aliased(User)
+    versions = (
+        db.query(FileVersion, CreatedBy)
+        .outerjoin(CreatedBy, CreatedBy.id == FileVersion.created_by_user_id)
+        .filter(FileVersion.org_artifact_id == oa.id)
+        .order_by(FileVersion.version_no.desc())
+        .all()
+    )
+    version_rows = [
+        {
+            "id": fv.id,
+            "version_no": fv.version_no,
+            "original_filename": fv.original_filename,
+            "created_at": fv.created_at,
+            "created_by_login": created_by.login if created_by else "",
+        }
+        for (fv, created_by) in versions
+    ]
+
+    # audit events for this org_artifact
+    Actor = aliased(User)
+    logs = (
+        db.query(AuditLog, Actor.login)
+        .outerjoin(Actor, Actor.id == AuditLog.actor_user_id)
+        .filter(AuditLog.entity_type == "org_artifact", AuditLog.entity_id == str(oa.id))
+        .order_by(AuditLog.at.desc(), AuditLog.id.desc())
+        .limit(250)
+        .all()
+    )
+    action_labels = {
+        "upload": "Загрузка",
+        "delete_file": "Удаление файла",
+        "nextcloud_import": "Синхронизация Nextcloud",
+        "nextcloud_import_v2": "Синхронизация Nextcloud",
+        "migration_import": "Импорт (миграция)",
+        "patch": "Правка",
+        "audit": "Проверено (аудит)",
+        "comment": "Комментарий",
+    }
+
+    fv_meta = {}
+    for (fv, _) in versions:
+        fv_meta[fv.id] = {"version_no": fv.version_no, "filename": fv.original_filename or ""}
+
+    def _fmt_status(v: object) -> str:
+        s = (str(v) if v is not None else "").strip().lower()
+        if s == "uploaded":
+            return "Загружен"
+        if s == "missing":
+            return "Не загружен"
+        return s or "—"
+
+    def _fmt_fv(fid: object) -> str:
+        if not fid:
+            return "—"
+        try:
+            fid_int = int(fid)
+        except Exception:
+            return str(fid)
+        m = fv_meta.get(fid_int)
+        if not m:
+            return f"fv#{fid_int}"
+        fn = m.get("filename") or ""
+        return f"v{m.get('version_no')} · {fn}" if fn else f"v{m.get('version_no')}"
+
+    def _audit_state(cur_id: object, aud_id: object) -> str:
+        if not cur_id:
+            return "—"
+        if not aud_id:
+            return "Требует аудита"
+        try:
+            if int(aud_id) == int(cur_id):
+                return "Проаудировано"
+        except Exception:
+            pass
+        return "Изменён"
+
+    def _human_details(action: str, before: dict | None, after: dict | None) -> str:
+        b = before if isinstance(before, dict) else {}
+        a = after if isinstance(after, dict) else {}
+
+        status = a.get("status", b.get("status"))
+        cur = a.get("current_file_version_id", b.get("current_file_version_id"))
+        aud = a.get("audited_file_version_id", b.get("audited_file_version_id"))
+        audit_state = _audit_state(cur, aud)
+
+        parts: list[str] = []
+
+        if action == "comment":
+            txt = (a.get("comment") or "").strip()
+            if txt:
+                one = " ".join(txt.split())
+                if len(one) > 140:
+                    one = one[:137] + "…"
+                return f"Комментарий: {one}"
+            return ""
+
+        if action == "upload":
+            parts.append(f"Файл: {_fmt_fv(cur)}")
+            parts.append(f"Статус: {_fmt_status(status)}")
+            parts.append(f"Аудит: {audit_state}")
+            return " · ".join([p for p in parts if p and p != "None"])
+
+        if action == "audit":
+            parts.append(f"Проаудировано: {_fmt_fv(aud or cur)}")
+            parts.append(f"Аудит: {audit_state}")
+            return " · ".join([p for p in parts if p and p != "None"])
+
+        if action == "delete_file":
+            prev_cur = b.get("current_file_version_id")
+            if prev_cur:
+                parts.append(f"Удалено: {_fmt_fv(prev_cur)}")
+            parts.append(f"Статус: {_fmt_status(status or 'missing')}")
+            parts.append(f"Аудит: {audit_state}")
+            return " · ".join([p for p in parts if p and p != "None"])
+
+        if action in ("nextcloud_import", "nextcloud_import_v2"):
+            rp = (a.get("remote_path") or "").strip()
+            if rp:
+                parts.append(f"Источник: Nextcloud · {rp}")
+            if status or cur or aud:
+                parts.append(f"Статус: {_fmt_status(status)}")
+                if cur:
+                    parts.append(f"Текущая: {_fmt_fv(cur)}")
+                parts.append(f"Аудит: {audit_state}")
+            return " · ".join([p for p in parts if p and p != "None"])
+
+        if action == "patch":
+            if status or cur or aud:
+                parts.append(f"Статус: {_fmt_status(status)}")
+                if cur:
+                    parts.append(f"Текущая: {_fmt_fv(cur)}")
+                parts.append(f"Аудит: {audit_state}")
+            return " · ".join([p for p in parts if p and p != "None"])
+
+        # fallback: show the key bits if present
+        if status:
+            parts.append(f"Статус: {_fmt_status(status)}")
+        if cur:
+            parts.append(f"Текущая: {_fmt_fv(cur)}")
+        if aud:
+            parts.append(f"Аудит: {_fmt_fv(aud)} ({audit_state})")
+        if a.get("remote_path"):
+            parts.append(f"remote: {a.get('remote_path')}")
+        return " · ".join([p for p in parts if p and p != "None"])
+
+    events = []
+    for (log, actor_login) in logs:
+        events.append(
+            {
+                "at": log.at,
+                "actor_login": actor_login or "",
+                "action_label": action_labels.get(log.action, log.action),
+                "details": _human_details(
+                    log.action,
+                    log.before_json if isinstance(log.before_json, dict) else None,
+                    log.after_json if isinstance(log.after_json, dict) else None,
+                ),
+            }
+        )
+
+    back_url = back or (request.headers.get("referer") or f"/auditor/artifacts?org_id={oa.org_id}")
+    if "://" in back_url:
+        back_url = f"/auditor/artifacts?org_id={oa.org_id}"
+
+    resp = templates.TemplateResponse(
+        "auditor_org_artifact_history.html",
+        {
+            "request": request,
+            "user": user,
+            "container_class": "container-wide",
+            "oa": oa,
+            "a": a,
+            "org": org,
+            "versions": version_rows,
+            "events": events,
+            "back_url": back_url,
+        },
+    )
+    resp.headers["Cache-Control"] = "no-store, max-age=0"
+    resp.headers["Pragma"] = "no-cache"
+    return resp
 
 
 @router.post("/auditor/org_artifacts/{org_artifact_id}/delete")
@@ -1249,7 +1945,13 @@ def admin_delete_current_file_for_org_artifact(
     if role != Role.admin:
         raise HTTPException(status_code=403, detail="Требуются права admin")
 
-    before = {"status": oa.status.value, "current_file_version_id": oa.current_file_version_id}
+    before = {
+        "status": oa.status.value,
+        "current_file_version_id": oa.current_file_version_id,
+        "audited_file_version_id": oa.audited_file_version_id,
+        "audited_at": oa.audited_at.isoformat() if oa.audited_at else None,
+        "audited_by_user_id": oa.audited_by_user_id,
+    }
 
     fv = db.get(FileVersion, oa.current_file_version_id) if oa.current_file_version_id else None
     if fv and (fv.storage_key or "").startswith("nextcloud:"):
@@ -1265,7 +1967,16 @@ def admin_delete_current_file_for_org_artifact(
     oa.status = OrgArtifactStatus.missing
     oa.updated_at = datetime.utcnow()
     oa.updated_by_user_id = user.id
-    after = {"status": oa.status.value, "current_file_version_id": oa.current_file_version_id}
+    oa.audited_file_version_id = None
+    oa.audited_at = None
+    oa.audited_by_user_id = None
+    after = {
+        "status": oa.status.value,
+        "current_file_version_id": oa.current_file_version_id,
+        "audited_file_version_id": oa.audited_file_version_id,
+        "audited_at": oa.audited_at,
+        "audited_by_user_id": oa.audited_by_user_id,
+    }
 
     write_audit_log(
         db,
@@ -1292,12 +2003,15 @@ def admin_org_artifact_versions_page(
     org_artifact_id: int,
     request: Request,
     db: Session = Depends(get_db),
-    user: User = Depends(require_admin),
+    user: User = Depends(get_current_user),
     back: str | None = None,
 ) -> HTMLResponse:
     oa = db.get(OrgArtifact, org_artifact_id)
     if not oa:
         raise HTTPException(status_code=404, detail="Артефакт организации не найден")
+    role = get_user_role_for_org(db, user, oa.org_id)
+    if role not in (Role.admin, Role.auditor):
+        raise HTTPException(status_code=403, detail="Требуются права auditor/admin")
     a = db.get(Artifact, oa.artifact_id)
     org = db.get(Organization, oa.org_id)
     if not a or not org:
@@ -1374,12 +2088,28 @@ def my_artifacts_upload(
     db.add(fv)
     db.flush()
 
-    before = {"status": oa.status.value, "current_file_version_id": oa.current_file_version_id}
+    before = {
+        "status": oa.status.value,
+        "current_file_version_id": oa.current_file_version_id,
+        "audited_file_version_id": oa.audited_file_version_id,
+        "audited_at": oa.audited_at.isoformat() if oa.audited_at else None,
+        "audited_by_user_id": oa.audited_by_user_id,
+    }
     oa.status = OrgArtifactStatus.uploaded
     oa.current_file_version_id = fv.id
     oa.updated_at = datetime.utcnow()
     oa.updated_by_user_id = user.id
-    after = {"status": oa.status.value, "current_file_version_id": oa.current_file_version_id}
+    # New version => audit reset
+    oa.audited_file_version_id = None
+    oa.audited_at = None
+    oa.audited_by_user_id = None
+    after = {
+        "status": oa.status.value,
+        "current_file_version_id": oa.current_file_version_id,
+        "audited_file_version_id": oa.audited_file_version_id,
+        "audited_at": oa.audited_at,
+        "audited_by_user_id": oa.audited_by_user_id,
+    }
 
     write_audit_log(
         db,
@@ -1393,7 +2123,7 @@ def my_artifacts_upload(
         request=request,
     )
     db.commit()
-    return _redirect(f"/my/artifacts")
+    return _redirect(f"/my/artifacts?org_id={oa.org_id}")
 
 
 @router.get("/my/artifacts/{org_artifact_id}/download")
@@ -1421,7 +2151,7 @@ def my_artifacts_download(
     if not fv or not fv.blob:
         raise HTTPException(status_code=404, detail="Файл не найден")
 
-    headers = {"Content-Disposition": f'attachment; filename="{fv.original_filename}"'}
+    headers = {"Content-Disposition": _download_content_disposition(fv.original_filename, fallback_prefix="artifact")}
     return Response(content=fv.blob, media_type=fv.content_type, headers=headers)
 
 
@@ -1439,12 +2169,27 @@ def my_artifacts_delete(
     if role != Role.customer:
         raise HTTPException(status_code=403, detail="Недостаточно прав")
 
-    before = {"status": oa.status.value, "current_file_version_id": oa.current_file_version_id}
+    before = {
+        "status": oa.status.value,
+        "current_file_version_id": oa.current_file_version_id,
+        "audited_file_version_id": oa.audited_file_version_id,
+        "audited_at": oa.audited_at.isoformat() if oa.audited_at else None,
+        "audited_by_user_id": oa.audited_by_user_id,
+    }
     oa.current_file_version_id = None
     oa.status = OrgArtifactStatus.missing
     oa.updated_at = datetime.utcnow()
     oa.updated_by_user_id = user.id
-    after = {"status": oa.status.value, "current_file_version_id": oa.current_file_version_id}
+    oa.audited_file_version_id = None
+    oa.audited_at = None
+    oa.audited_by_user_id = None
+    after = {
+        "status": oa.status.value,
+        "current_file_version_id": oa.current_file_version_id,
+        "audited_file_version_id": oa.audited_file_version_id,
+        "audited_at": oa.audited_at,
+        "audited_by_user_id": oa.audited_by_user_id,
+    }
 
     write_audit_log(
         db,
@@ -1458,7 +2203,7 @@ def my_artifacts_delete(
         request=request,
     )
     db.commit()
-    return _redirect("/my/artifacts")
+    return _redirect(f"/my/artifacts?org_id={oa.org_id}")
 
 def _require_admin_or_global_auditor(db: Session, user: User) -> None:
     if user.is_admin:
@@ -1667,7 +2412,7 @@ def download_file(
     if not role:
         raise HTTPException(status_code=403, detail="Нет доступа к организации")
 
-    headers = {"Content-Disposition": f'attachment; filename="{stored.original_filename}"'}
+    headers = {"Content-Disposition": _download_content_disposition(stored.original_filename, fallback_prefix="file")}
     return Response(content=stored.blob, media_type=stored.content_type, headers=headers)
 
 
@@ -1709,6 +2454,7 @@ def admin_nextcloud_save(
     user: User = Depends(require_admin),
 ) -> Response:
     s = _get_nextcloud_settings(db)
+    before = {"base_url": s.base_url, "username": s.username, "root_folder": s.root_folder, "create_orgs": s.create_orgs, "is_enabled": s.is_enabled}
     s.base_url = (base_url or "").strip()
     s.username = (username or "").strip()
     s.password = password or ""
@@ -1716,8 +2462,240 @@ def admin_nextcloud_save(
     s.create_orgs = str(create_orgs).lower() == "true"
     s.is_enabled = str(is_enabled).lower() == "true"
     s.last_error = ""
+    write_audit_log(
+        db,
+        actor=user,
+        org_id=None,
+        action="update",
+        entity_type="nextcloud_settings",
+        entity_id=str(s.id or "1"),
+        before=before,
+        after={"base_url": s.base_url, "username": s.username, "root_folder": s.root_folder, "create_orgs": s.create_orgs, "is_enabled": s.is_enabled},
+        request=request,
+    )
     db.commit()
     return _redirect("/admin/integrations/nextcloud?saved=1")
+
+
+@router.get("/admin/audit", response_class=HTMLResponse)
+def admin_audit_log_page(
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_admin),
+    actor_user_id: int | None = None,
+    org_id: int | None = None,
+    action: str | None = None,
+    entity_type: str | None = None,
+    date_from: str | None = None,  # YYYY-MM-DD
+    date_to: str | None = None,  # YYYY-MM-DD
+    page: int = 1,
+    page_size: int = 50,
+) -> HTMLResponse:
+    page = max(int(page or 1), 1)
+    page_size = int(page_size or 50)
+    if page_size < 10:
+        page_size = 10
+    if page_size > 200:
+        page_size = 200
+
+    Actor = aliased(User)
+    Org = aliased(Organization)
+    q = db.query(AuditLog, Actor.login, Org.name).outerjoin(Actor, Actor.id == AuditLog.actor_user_id).outerjoin(Org, Org.id == AuditLog.org_id)
+
+    if actor_user_id:
+        q = q.filter(AuditLog.actor_user_id == actor_user_id)
+    if org_id:
+        q = q.filter(AuditLog.org_id == org_id)
+    if action:
+        q = q.filter(AuditLog.action == action)
+    if entity_type:
+        q = q.filter(AuditLog.entity_type == entity_type)
+
+    def parse_date(s: str | None) -> datetime | None:
+        if not s:
+            return None
+        try:
+            return datetime.strptime(s.strip(), "%Y-%m-%d")
+        except Exception:
+            return None
+
+    d_from = parse_date(date_from)
+    d_to = parse_date(date_to)
+    if d_from:
+        q = q.filter(AuditLog.at >= d_from)
+    if d_to:
+        # inclusive end date
+        q = q.filter(AuditLog.at < (d_to + timedelta(days=1)))
+
+    total = q.count()
+    total_pages = max((total + page_size - 1) // page_size, 1)
+    if page > total_pages:
+        page = total_pages
+    offset = (page - 1) * page_size
+
+    rows = q.order_by(AuditLog.at.desc(), AuditLog.id.desc()).offset(offset).limit(page_size).all()
+
+    def jdump(v: dict | None) -> str:
+        if not v:
+            return ""
+        try:
+            return json.dumps(v, ensure_ascii=False, indent=2, sort_keys=True)
+        except Exception:
+            return str(v)
+
+    def _fmt_val(v: object) -> str:
+        if v is None:
+            return "—"
+        try:
+            if isinstance(v, (dict, list)):
+                s = json.dumps(v, ensure_ascii=False, sort_keys=True)
+            else:
+                s = str(v)
+        except Exception:
+            s = str(v)
+        s = s.replace("\r\n", "\n")
+        if len(s) > 260:
+            s = s[:257] + "…"
+        return s
+
+    def _diff_top_level(before: dict | None, after: dict | None) -> list[dict]:
+        b = before or {}
+        a = after or {}
+        keys = sorted(set(b.keys()) | set(a.keys()))
+        out: list[dict] = []
+        for k in keys:
+            in_b = k in b
+            in_a = k in a
+            if in_b and not in_a:
+                out.append({"key": k, "kind": "removed", "before": _fmt_val(b.get(k)), "after": "—"})
+                continue
+            if in_a and not in_b:
+                out.append({"key": k, "kind": "added", "before": "—", "after": _fmt_val(a.get(k))})
+                continue
+            vb = b.get(k)
+            va = a.get(k)
+            if vb != va:
+                out.append({"key": k, "kind": "changed", "before": _fmt_val(vb), "after": _fmt_val(va)})
+        return out
+
+    items = []
+    def _audit_status_from_state(state: dict | None) -> str:
+        s = state or {}
+        cur = s.get("current_file_version_id")
+        aud = s.get("audited_file_version_id")
+        if not cur:
+            return "—"
+        if not aud:
+            return "Требует аудита"
+        if aud == cur:
+            return "Проаудировано"
+        return "Изменён"
+
+    for (log, actor_login, org_name) in rows:
+        changes = _diff_top_level(log.before_json if isinstance(log.before_json, dict) else None, log.after_json if isinstance(log.after_json, dict) else None)
+        audit_status = ""
+        if log.entity_type == "org_artifact":
+            state = log.after_json if isinstance(log.after_json, dict) else (log.before_json if isinstance(log.before_json, dict) else None)
+            audit_status = _audit_status_from_state(state)
+        items.append(
+            {
+                "id": log.id,
+                "at": log.at,
+                "actor_login": actor_login or "",
+                "org_name": org_name or "",
+                "action": log.action,
+                "entity_type": log.entity_type,
+                "entity_id": log.entity_id,
+                "ip": log.ip,
+                "user_agent": log.user_agent,
+                "changes": changes,
+                "before": jdump(log.before_json),
+                "after": jdump(log.after_json),
+                "audit_status": audit_status,
+            }
+        )
+
+    # Russian labels for UI
+    action_labels = {
+        "create": "Создание",
+        "update": "Изменение",
+        "delete": "Удаление",
+        "upload": "Загрузка файла",
+        "delete_file": "Удаление файла",
+        "comment": "Комментарий",
+        "audit": "Проверено",
+        "import_apply": "Импорт (применить)",
+        "export_xlsx": "Экспорт XLSX",
+        "nextcloud_import": "Синхронизация Nextcloud",
+        "nextcloud_import_v2": "Синхронизация Nextcloud (03 Артефакты)",
+        "nextcloud_import_v1": "Синхронизация Nextcloud (v1)",
+        "patch": "Правка",
+    }
+    entity_type_labels = {
+        "org_artifact": "Артефакт организации",
+        "artifact": "Артефакт (справочник)",
+        "artifacts": "Справочник артефактов",
+        "organization": "Организация",
+        "user": "Пользователь",
+        "membership": "Роль/доступ",
+        "nextcloud_settings": "Настройки Nextcloud",
+        "org": "Организация",
+    }
+
+    # filter options
+    users = db.query(User).order_by(User.login.asc()).all()
+    orgs = db.query(Organization).order_by(Organization.name.asc()).all()
+    actions = [a for (a,) in db.query(AuditLog.action).distinct().order_by(AuditLog.action.asc()).limit(300).all()]
+    entity_types = [t for (t,) in db.query(AuditLog.entity_type).distinct().order_by(AuditLog.entity_type.asc()).limit(300).all()]
+
+    base_qs = {
+        "actor_user_id": str(actor_user_id or ""),
+        "org_id": str(org_id or ""),
+        "action": action or "",
+        "entity_type": entity_type or "",
+        "date_from": date_from or "",
+        "date_to": date_to or "",
+        "page_size": str(page_size),
+    }
+    base_query = urlencode({k: v for k, v in base_qs.items() if v})
+
+    window = 3
+    start = max(1, page - window)
+    end = min(total_pages, page + window)
+    page_links = list(range(start, end + 1))
+
+    resp = templates.TemplateResponse(
+        "admin/audit_log.html",
+        {
+            "request": request,
+            "user": user,
+            "container_class": "container-wide",
+            "items": items,
+            "users": users,
+            "orgs": orgs,
+            "actions": actions,
+            "entity_types": entity_types,
+            "action_labels": action_labels,
+            "entity_type_labels": entity_type_labels,
+            "filters": {
+                "actor_user_id": actor_user_id,
+                "org_id": org_id,
+                "action": action or "",
+                "entity_type": entity_type or "",
+                "date_from": date_from or "",
+                "date_to": date_to or "",
+            },
+            "page": page,
+            "page_size": page_size,
+            "total": total,
+            "total_pages": total_pages,
+            "page_links": page_links,
+            "base_query": base_query,
+        },
+    )
+    resp.headers["Cache-Control"] = "no-store, max-age=0"
+    resp.headers["Pragma"] = "no-cache"
+    return resp
 
 
 def _dav_from_settings(s: NextcloudIntegrationSettings) -> NextcloudDavClient:
@@ -2029,6 +3007,8 @@ def admin_orgs(
     request: Request,
     db: Session = Depends(get_db),
     user: User = Depends(require_admin),
+    q: str | None = None,
+    err: str | None = None,
     page: int = 1,
     page_size: int = 20,
     sort: str = "created_at",
@@ -2049,6 +3029,10 @@ def admin_orgs(
     # For "created_by" sorting we need the creator login; use an outer join to avoid N+1.
     creator_login = func.coalesce(User.login, Organization.created_via)
     base_q = db.query(Organization, creator_login.label("creator_login")).outerjoin(User, User.id == Organization.created_by_user_id)
+
+    q_text = (q or "").strip()
+    if q_text:
+        base_q = base_q.filter(Organization.name.ilike(f"%{q_text}%"))
 
     if sort_key == "name":
         order_expr = Organization.name.asc() if sort_dir == "asc" else Organization.name.desc()
@@ -2084,11 +3068,22 @@ def admin_orgs(
                 created_by_label = "—"
         org_rows.append({"org": o, "created_by_label": created_by_label})
 
-    base_query = urlencode({"page_size": str(page_size), "sort": sort_key, "dir": sort_dir})
+    base_qd: dict[str, str] = {"page_size": str(page_size), "sort": sort_key, "dir": sort_dir}
+    if q_text:
+        base_qd["q"] = q_text
+    base_query = urlencode(base_qd)
     window = 3
     start = max(1, page - window)
     end = min(total_pages, page + window)
     page_links = list(range(start, end + 1))
+
+    err_text = (err or "").strip()
+    if err_text:
+        # минимальная санитация: убираем переносы/ограничиваем размер
+        err_text = " ".join(err_text.split())
+        err_text = err_text[:240]
+    else:
+        err_text = None
 
     resp = templates.TemplateResponse(
         "admin/orgs.html",
@@ -2096,7 +3091,8 @@ def admin_orgs(
             "request": request,
             "user": user,
             "orgs": org_rows,
-            "error": None,
+            "error": err_text,
+            "filters": {"q": q_text},
             "page": page,
             "page_size": page_size,
             "total": total,
@@ -2114,6 +3110,18 @@ def admin_orgs(
     return resp
 
 
+@router.get("/admin/orgs/new", response_class=HTMLResponse)
+def admin_orgs_create_page(
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_admin),
+) -> HTMLResponse:
+    return templates.TemplateResponse(
+        "admin/org_create.html",
+        {"request": request, "user": user, "error": None, "form": {"name": ""}},
+    )
+
+
 @router.post("/admin/orgs")
 def admin_orgs_create(
     request: Request,
@@ -2123,21 +3131,31 @@ def admin_orgs_create(
 ) -> Response:
     name = name.strip()
     if not name:
-        orgs = db.query(Organization).order_by(Organization.name.asc()).all()
         return templates.TemplateResponse(
-            "admin/orgs.html",
-            {"request": request, "user": user, "orgs": orgs, "error": "Имя организации обязательно"},
+            "admin/org_create.html",
+            {"request": request, "user": user, "error": "Имя организации обязательно", "form": {"name": ""}},
             status_code=400,
         )
     exists = db.query(Organization).filter(Organization.name == name).one_or_none()
     if exists:
-        orgs = db.query(Organization).order_by(Organization.name.asc()).all()
         return templates.TemplateResponse(
-            "admin/orgs.html",
-            {"request": request, "user": user, "orgs": orgs, "error": "Организация уже существует"},
+            "admin/org_create.html",
+            {"request": request, "user": user, "error": "Организация уже существует", "form": {"name": name}},
             status_code=400,
         )
-    db.add(Organization(name=name, created_by_user_id=user.id, created_via="manual"))
+    org = Organization(name=name, created_by_user_id=user.id, created_via="manual")
+    db.add(org)
+    db.flush()
+    write_audit_log(
+        db,
+        actor=user,
+        org_id=None,
+        action="create",
+        entity_type="organization",
+        entity_id=str(org.id),
+        after={"name": org.name, "created_via": getattr(org, "created_via", "")},
+        request=request,
+    )
     db.commit()
     return _redirect("/admin/orgs")
 
@@ -2172,7 +3190,19 @@ def admin_orgs_edit_save(
     exists = db.query(Organization).filter(Organization.name == name, Organization.id != org.id).one_or_none()
     if exists:
         return templates.TemplateResponse("admin/org_edit.html", {"request": request, "user": user, "org": org, "error": "Организация с таким именем уже существует"}, status_code=400)
+    before = {"name": org.name}
     org.name = name
+    write_audit_log(
+        db,
+        actor=user,
+        org_id=None,
+        action="update",
+        entity_type="organization",
+        entity_id=str(org.id),
+        before=before,
+        after={"name": org.name},
+        request=request,
+    )
     db.commit()
     return _redirect("/admin/orgs")
 
@@ -2188,25 +3218,32 @@ def admin_orgs_delete(
     if not org:
         raise HTTPException(status_code=404, detail="Организация не найдена")
     try:
+        before = {"name": org.name}
         db.delete(org)
+        write_audit_log(
+            db,
+            actor=user,
+            org_id=None,
+            action="delete",
+            entity_type="organization",
+            entity_id=str(org_id),
+            before=before,
+            after=None,
+            request=request,
+        )
         db.commit()
         return _redirect("/admin/orgs")
     except IntegrityError:
         db.rollback()
-        orgs = db.query(Organization).order_by(Organization.created_at.desc(), Organization.id.desc()).all()
-        resp = templates.TemplateResponse(
-            "admin/orgs.html",
-            {
-                "request": request,
-                "user": user,
-                "orgs": orgs,
-                "error": "Нельзя удалить организацию: есть связанные данные (артефакты/пользователи/файлы).",
-            },
-            status_code=400,
+        # Редирект на список с сообщением (не рендерим orgs.html напрямую, т.к. нужен сложный контекст)
+        return _redirect(
+            "/admin/orgs?"
+            + urlencode(
+                {
+                    "err": "Нельзя удалить организацию: есть связанные данные (артефакты/пользователи/файлы).",
+                }
+            )
         )
-        resp.headers["Cache-Control"] = "no-store, max-age=0"
-        resp.headers["Pragma"] = "no-cache"
-        return resp
 
 
 @router.get("/admin/users", response_class=HTMLResponse)
@@ -2215,6 +3252,8 @@ def admin_users(
     db: Session = Depends(get_db),
     user: User = Depends(require_admin),
     org_id: str | None = None,
+    login: str | None = None,
+    full_name: str | None = None,
     page: int = 1,
     page_size: int = 50,
     sort: str = "login",
@@ -2229,6 +3268,12 @@ def admin_users(
 
     orgs = db.query(Organization).order_by(Organization.name.asc()).all()
     selected_org_id = int(org_id) if (org_id and str(org_id).isdigit()) else None
+    selected_org_name = ""
+    if selected_org_id:
+        for o in orgs:
+            if o.id == selected_org_id:
+                selected_org_name = o.name
+                break
 
     sort_key = (sort or "login").strip().lower()
     sort_dir = (dir or "asc").strip().lower()
@@ -2238,6 +3283,13 @@ def admin_users(
     q = db.query(User)
     if selected_org_id:
         q = q.join(UserOrgMembership, UserOrgMembership.user_id == User.id).filter(UserOrgMembership.org_id == selected_org_id)
+
+    login_q = (login or "").strip()
+    full_name_q = (full_name or "").strip()
+    if login_q:
+        q = q.filter(User.login.ilike(f"%{login_q}%"))
+    if full_name_q:
+        q = q.filter(User.full_name.ilike(f"%{full_name_q}%"))
 
     if sort_key == "created_at":
         order_expr = User.created_at.asc() if sort_dir == "asc" else User.created_at.desc()
@@ -2263,6 +3315,10 @@ def admin_users(
     base_qd: dict[str, str] = {"page_size": str(page_size), "sort": sort_key, "dir": sort_dir}
     if selected_org_id:
         base_qd["org_id"] = str(selected_org_id)
+    if login_q:
+        base_qd["login"] = login_q
+    if full_name_q:
+        base_qd["full_name"] = full_name_q
     base_query = urlencode(base_qd)
     window = 3
     start = max(1, page - window)
@@ -2275,9 +3331,12 @@ def admin_users(
         {
             "request": request,
             "user": user,
+            "container_class": "container-wide",
             "users": users,
             "orgs": orgs,
             "selected_org_id": selected_org_id,
+            "selected_org_name": selected_org_name,
+            "filters": {"login": login_q, "full_name": full_name_q},
             "error": None,
             "page": page,
             "page_size": page_size,
@@ -2297,6 +3356,18 @@ def admin_users(
     return resp
 
 
+@router.get("/admin/users/new", response_class=HTMLResponse)
+def admin_users_create_page(
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_admin),
+) -> HTMLResponse:
+    return templates.TemplateResponse(
+        "admin/user_create.html",
+        {"request": request, "user": user, "error": None, "form": {"login": "", "full_name": "", "is_admin": False}},
+    )
+
+
 @router.post("/admin/users")
 def admin_users_create(
     request: Request,
@@ -2309,17 +3380,26 @@ def admin_users_create(
 ) -> Response:
     login = login.strip()
     if not login:
-        users = db.query(User).order_by(User.login.asc()).all()
-        return templates.TemplateResponse("admin/users.html", {"request": request, "user": user, "users": users, "error": "Логин обязателен"}, status_code=400)
+        return templates.TemplateResponse(
+            "admin/user_create.html",
+            {"request": request, "user": user, "error": "Логин обязателен", "form": {"login": "", "full_name": full_name, "is_admin": bool(is_admin)}},
+            status_code=400,
+        )
     exists = db.query(User).filter(User.login == login).one_or_none()
     if exists:
-        users = db.query(User).order_by(User.login.asc()).all()
-        return templates.TemplateResponse("admin/users.html", {"request": request, "user": user, "users": users, "error": "Логин уже используется"}, status_code=400)
+        return templates.TemplateResponse(
+            "admin/user_create.html",
+            {"request": request, "user": user, "error": "Логин уже используется", "form": {"login": login, "full_name": full_name, "is_admin": bool(is_admin)}},
+            status_code=400,
+        )
 
     pwd_err = _validate_password(password)
     if pwd_err:
-        users = db.query(User).order_by(User.login.asc()).all()
-        return templates.TemplateResponse("admin/users.html", {"request": request, "user": user, "users": users, "error": pwd_err}, status_code=400)
+        return templates.TemplateResponse(
+            "admin/user_create.html",
+            {"request": request, "user": user, "error": pwd_err, "form": {"login": login, "full_name": full_name, "is_admin": bool(is_admin)}},
+            status_code=400,
+        )
     new_user = User(
         login=login,
         password_hash="",
@@ -2329,6 +3409,17 @@ def admin_users_create(
     )
     new_user.password_hash = hash_password(password)
     db.add(new_user)
+    db.flush()
+    write_audit_log(
+        db,
+        actor=user,
+        org_id=None,
+        action="create",
+        entity_type="user",
+        entity_id=str(new_user.id),
+        after={"login": new_user.login, "is_admin": bool(new_user.is_admin), "is_active": bool(new_user.is_active)},
+        request=request,
+    )
     db.commit()
     return _redirect("/admin/users")
 
@@ -2347,7 +3438,19 @@ def admin_users_toggle_active(
     if u.id == user.id:
         # Не даём заблокировать себя, чтобы не потерять доступ.
         return _redirect(back or "/admin/users")
+    before = {"is_active": bool(u.is_active)}
     u.is_active = not bool(u.is_active)
+    write_audit_log(
+        db,
+        actor=user,
+        org_id=None,
+        action="update",
+        entity_type="user",
+        entity_id=str(u.id),
+        before=before,
+        after={"is_active": bool(u.is_active)},
+        request=request,
+    )
     db.commit()
     return _redirect(back or "/admin/users")
 
@@ -2367,9 +3470,21 @@ def admin_users_delete(
         # Не даём удалить себя.
         return _redirect(back or "/admin/users")
     try:
+        before = {"login": u.login, "full_name": u.full_name, "is_active": bool(u.is_active), "is_admin": bool(u.is_admin)}
         # Сначала удаляем роли/привязки к организациям (иначе ORM пытается проставить NULL в user_id).
         db.query(UserOrgMembership).filter(UserOrgMembership.user_id == u.id).delete(synchronize_session=False)
         db.delete(u)
+        write_audit_log(
+            db,
+            actor=user,
+            org_id=None,
+            action="delete",
+            entity_type="user",
+            entity_id=str(user_id),
+            before=before,
+            after=None,
+            request=request,
+        )
         db.commit()
         return _redirect(back or "/admin/users")
     except IntegrityError:
@@ -2406,16 +3521,30 @@ def admin_users_edit_save(
     if not u:
         raise HTTPException(status_code=404, detail="Пользователь не найден")
 
+    before = {"full_name": u.full_name, "is_active": bool(u.is_active), "is_admin": bool(u.is_admin)}
     u.full_name = (full_name or "").strip()
     u.is_active = str(is_active).lower() == "true"
     u.is_admin = str(is_admin).lower() == "true"
+    changed_password = False
 
     if new_password and new_password.strip():
         pwd_err = _validate_password(new_password)
         if pwd_err:
             return templates.TemplateResponse("admin/user_edit.html", {"request": request, "user": user, "u": u, "error": pwd_err}, status_code=400)
         u.password_hash = hash_password(new_password)
+        changed_password = True
 
+    write_audit_log(
+        db,
+        actor=user,
+        org_id=None,
+        action="update",
+        entity_type="user",
+        entity_id=str(u.id),
+        before=before,
+        after={"full_name": u.full_name, "is_active": bool(u.is_active), "is_admin": bool(u.is_admin), "password_changed": changed_password},
+        request=request,
+    )
     db.commit()
     return _redirect("/admin/users")
 
@@ -2460,19 +3589,13 @@ def admin_memberships(request: Request, db: Session = Depends(get_db), user: Use
 @router.post("/admin/memberships")
 def admin_memberships_create(
     request: Request,
-    user_id: int = Form(...),
-    org_id: int = Form(...),
+    user_id: int | None = Form(None),
+    org_id: int | None = Form(None),
     role: str = Form(...),
     db: Session = Depends(get_db),
     user: User = Depends(require_admin),
 ) -> Response:
-    # Не даём назначать роли на служебную Default организацию.
-    org = db.get(Organization, org_id)
-    if org and org.name == "Default":
-        return _redirect("/admin/memberships")
-    try:
-        role_enum = Role(role)
-    except ValueError:
+    def _render_error(msg: str, status_code: int = 400) -> HTMLResponse:
         all_users = db.query(User).order_by(User.login.asc()).all()
         system_users = [u for u in all_users if u.is_admin or (u.login or "").strip().lower() in ("admin", "auditor")]
         users = [u for u in all_users if u not in system_users]
@@ -2500,19 +3623,57 @@ def admin_memberships_create(
                 "memberships": org_memberships,
                 "roles": [r.value for r in Role],
                 "role_labels": role_labels,
-                "error": "Некорректная роль",
+                "error": msg,
             },
-            status_code=400,
+            status_code=status_code,
         )
+
+    if not user_id:
+        return _render_error("Выберите пользователя")
+    if not org_id:
+        return _render_error("Выберите организацию")
+
+    # Не даём назначать роли на служебную Default организацию.
+    org = db.get(Organization, org_id)
+    if org and org.name == "Default":
+        return _redirect("/admin/memberships")
+    try:
+        role_enum = Role(role)
+    except ValueError:
+        return _render_error("Некорректная роль")
     exists = (
         db.query(UserOrgMembership)
         .filter(UserOrgMembership.user_id == user_id, UserOrgMembership.org_id == org_id)
         .one_or_none()
     )
     if exists:
+        before = {"role": exists.role.value}
         exists.role = role_enum
+        write_audit_log(
+            db,
+            actor=user,
+            org_id=org_id,
+            action="update",
+            entity_type="membership",
+            entity_id=str(exists.id),
+            before=before,
+            after={"role": exists.role.value},
+            request=request,
+        )
     else:
-        db.add(UserOrgMembership(user_id=user_id, org_id=org_id, role=role_enum))
+        m = UserOrgMembership(user_id=user_id, org_id=org_id, role=role_enum)
+        db.add(m)
+        db.flush()
+        write_audit_log(
+            db,
+            actor=user,
+            org_id=org_id,
+            action="create",
+            entity_type="membership",
+            entity_id=str(m.id),
+            after={"user_id": user_id, "org_id": org_id, "role": m.role.value},
+            request=request,
+        )
     db.commit()
     return _redirect("/admin/memberships")
 

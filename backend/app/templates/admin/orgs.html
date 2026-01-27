@@ -5,29 +5,33 @@
       <h2 style="margin:0">Организации</h2>
       <div class="muted">Справочник организаций. Можно создавать и редактировать.</div>
     </div>
-    <div class="row-right"><a class="btn btn-secondary" href="/admin">Назад</a></div>
+    <div class="row-right">
+      <a class="btn" href="/admin/orgs/new">Создать организацию</a>
+      <a class="btn btn-secondary" href="/admin">Назад</a>
+    </div>
   </div>
 
   <div class="card">
     {% if error %}
       <div class="error">{{ error }}</div>
     {% endif %}
-    <form method="post" action="/admin/orgs" class="grid">
-      <div style="grid-column: span 2">
-        <label>Имя</label>
-        <input name="name" required />
-      </div>
-      <div class="filter-actions" style="grid-column: span 2">
-        <button class="btn" type="submit">Создать</button>
-      </div>
-    </form>
-  </div>
-
-  <div class="card">
     <div class="section-header">
       <h3 style="margin:0">Таблица</h3>
       <div class="muted">Показано {{ orgs|length }} из {{ total }}</div>
     </div>
+    <form method="get" action="/admin/orgs" class="header-inline-form" style="margin-top: 10px; width: 100%">
+      <label style="margin:0">Поиск по названию</label>
+      <input name="q" value="{{ filters.q }}" placeholder="например: Тестовая организация" style="flex: 1 1 520px; min-width: 320px" />
+      <div class="filter-actions" style="margin-left: auto">
+        <button class="btn btn-secondary" type="submit">Применить</button>
+        <a class="btn btn-secondary" href="/admin/orgs">Сброс</a>
+      </div>
+
+      <input type="hidden" name="page" value="1" />
+      <input type="hidden" name="page_size" value="{{ page_size }}" />
+      <input type="hidden" name="sort" value="{{ sort }}" />
+      <input type="hidden" name="dir" value="{{ dir }}" />
+    </form>
     <div class="table-wrap">
     <table class="table">
       <thead>
@@ -116,9 +120,15 @@
         {% endif %}
       </div>
       <form class="pagination-jump" method="get" action="/admin/orgs">
-        <input type="hidden" name="page_size" value="{{ page_size }}" />
+        {% if filters.q %}<input type="hidden" name="q" value="{{ filters.q }}" />{% endif %}
         <input type="hidden" name="sort" value="{{ sort }}" />
         <input type="hidden" name="dir" value="{{ dir }}" />
+        <label style="margin:0">Строк на страницу</label>
+        <select name="page_size" style="width: 120px" onchange="this.form.page.value='1'">
+          {% for s in [10,20,50,100,200] %}
+            <option value="{{ s }}" {% if s == page_size %}selected{% endif %}>{{ s }}</option>
+          {% endfor %}
+        </select>
         <label style="margin:0">Перейти</label>
         <input name="page" type="number" min="1" max="{{ total_pages }}" value="{{ page }}" style="width: 110px" />
         <button class="btn btn-secondary" type="submit">Ок</button>

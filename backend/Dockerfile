@@ -8,6 +8,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
       curl \
+      libreoffice \
+      fonts-dejavu-core \
       tzdata \
     && rm -rf /var/lib/apt/lists/*
 

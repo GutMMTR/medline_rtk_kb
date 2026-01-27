@@ -160,12 +160,28 @@ def upload_artifact_file(
     db.add(fv)
     db.flush()
 
-    before = {"status": oa.status.value, "current_file_version_id": oa.current_file_version_id}
+    before = {
+        "status": oa.status.value,
+        "current_file_version_id": oa.current_file_version_id,
+        "audited_file_version_id": oa.audited_file_version_id,
+        "audited_at": oa.audited_at.isoformat() if oa.audited_at else None,
+        "audited_by_user_id": oa.audited_by_user_id,
+    }
     oa.status = OrgArtifactStatus.uploaded
     oa.current_file_version_id = fv.id
     oa.updated_at = datetime.utcnow()
     oa.updated_by_user_id = user.id
-    after = {"status": oa.status.value, "current_file_version_id": oa.current_file_version_id}
+    # New version => audit reset
+    oa.audited_file_version_id = None
+    oa.audited_at = None
+    oa.audited_by_user_id = None
+    after = {
+        "status": oa.status.value,
+        "current_file_version_id": oa.current_file_version_id,
+        "audited_file_version_id": oa.audited_file_version_id,
+        "audited_at": oa.audited_at,
+        "audited_by_user_id": oa.audited_by_user_id,
+    }
 
     write_audit_log(
         db,

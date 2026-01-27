@@ -48,14 +48,23 @@ button:disabled, .btn[aria-disabled="true"] { opacity: .65; cursor: not-allowed;
 .error { margin-top: 10px; color:#b42318; }
 .badge { background:#12b76a; color:#fff; border-radius: 999px; padding: 2px 10px; font-size: 12px; display:inline-flex; align-items:center; justify-content:center; min-width: 96px; height: 22px; white-space: nowrap; }
 .badge-danger { background:#b42318; }
+.badge-warn { background:#f79009; }       /* требует внимания */
+.badge-info { background:#1570ef; }       /* информационный */
+.badge-neutral { background:#667085; }    /* нейтральный */
 table { width:100%; border-collapse: collapse; }
 th, td { border-bottom: 1px solid #eaecf0; padding: 10px; text-align:left; vertical-align: top; }
 th { color:#344054; font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
 .grid { display:grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
 .filter-form > div { display:flex; flex-direction:column; min-width: 0; }
 .filter-form label { margin-top: 0; }
-.filter-actions { display:flex; align-items:flex-end; justify-content:flex-end; }
+.filter-actions { display:flex; align-items:flex-end; justify-content:flex-end; gap: 10px; flex-wrap: nowrap; }
+/* override .filter-form > div (more specific) so actions are ALWAYS horizontal */
+.filter-form > .filter-actions { flex-direction: row; }
 .filter-actions .btn { height: 40px; padding: 0 14px; line-height: 38px; }
+
+/* Filters: on narrow screens keep the action button on a separate row */
+.filter-form--status > .filter-actions,
+.filter-form--nostatus > .filter-actions { grid-column: 1 / -1; }
 
 /* Customer filters: nicer layout on wide screens */
 @media (min-width: 1200px) {
@@ -67,9 +76,10 @@ th { color:#344054; font-size: 12px; text-transform: uppercase; letter-spacing: 
   .filter-kb { grid-column: span 3; }
 
   /* Pages WITH status filter (customer/auditor artifacts) */
-  .filter-form--status .filter-status { grid-column: span 2; }
-  .filter-form--status .filter-short { grid-column: span 3; }
+  .filter-form--status .filter-status { grid-column: span 3; }
+  .filter-form--status .filter-short { grid-column: span 5; }
   .filter-form--status .filter-actions { grid-column: span 1; }
+  .filter-form--status > .filter-actions { justify-self: end; }
 
   /* Pages WITHOUT status filter (artifact directory) */
   .filter-form--nostatus .filter-short { grid-column: span 5; }
@@ -77,6 +87,11 @@ th { color:#344054; font-size: 12px; text-transform: uppercase; letter-spacing: 
 }
 .table-wrap { overflow: auto; }
 .table td:last-child, .table th:last-child { white-space: nowrap; }
+.audit-id{ word-break: break-all; white-space: normal; }
+.audit-diff-table td, .audit-diff-table th{ vertical-align: top; }
+.audit-diff-added{ background: rgba(18,183,106,.10); }
+.audit-diff-removed{ background: rgba(180,35,24,.08); }
+.audit-diff-changed{ background: rgba(247,144,9,.10); }
 .col-status { width: 140px; text-align: center; }
 .th-actions { width: 52px; }
 .td-actions { width: 52px; text-align: right; vertical-align: middle; }
@@ -87,12 +102,18 @@ th { color:#344054; font-size: 12px; text-transform: uppercase; letter-spacing: 
 .icon-btn:hover { background:#f2f4f7; }
 .icon-danger { color: #b42318; border-color: #fda29b; }
 .icon-danger:hover { background:#fee4e2; }
+.icon-success { color: #12b76a; border-color: rgba(18,183,106,.45); }
+.icon-success:hover { background: rgba(18,183,106,.10); }
+.icon-warn { color: #f79009; border-color: rgba(247,144,9,.55); }
+.icon-warn:hover { background: rgba(247,144,9,.12); }
 /* Optional: keep for other icon images (if any), but SVG is preferred for consistent styling */
 .icon-btn .icon-img { width: 18px; height: 18px; display:block; }
 
 .upload-row { display:flex; align-items:center; gap: 10px; }
 .file-input { width: 260px; }
-.table .upload-row { justify-content: flex-end; }
+.table .upload-row { justify-content: flex-start; gap: 8px; }
+.table .file-input { width: 200px; max-width: 100%; }
+.table .badge { min-width: 0; }
 .table .btn, .table .btn-secondary { height: 32px; padding: 0 12px; line-height: 30px; }
 .table .icon-btn { height: 32px; width: 36px; }
 .td-actions .row-right { align-items: center; }
@@ -141,6 +162,45 @@ th { color:#344054; font-size: 12px; text-transform: uppercase; letter-spacing: 
 .page-chip:hover { background:#f2f4f7; }
 .page-chip-active { background:#101828; color:#fff; border-color:#101828; }
 .pagination-jump { display:flex; align-items:center; gap: 8px; }
+
+/* Combo (searchable dropdown) */
+.combo { position: relative; }
+.combo-input-wrap{ position: relative; }
+.combo-input{ padding-right: 34px; }
+.combo-caret{ color: var(--muted); }
+.combo-input-wrap .combo-caret{
+  position:absolute;
+  right: 12px;
+  top: 50%;
+  transform: translateY(-50%);
+  pointer-events:none;
+}
+.combo-popover{
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: calc(100% + 6px);
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: var(--shadow);
+  padding: 8px;
+  z-index: 50;
+}
+.combo-list{ max-height: 280px; overflow: auto; display:flex; flex-direction:column; gap: 4px; }
+.combo-option{
+  width: 100%;
+  text-align:left;
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 8px 10px;
+  cursor: pointer;
+  color: var(--text);
+  font-size: 14px;
+}
+.combo-option:hover{ background: rgba(107,45,255,.06); border-color: rgba(107,45,255,.25); }
+.combo-option--active{ background: rgba(18,183,106,.10); border-color: rgba(18,183,106,.35); }
 
 /* Admin home */
 .admin-home{

@@ -121,6 +121,11 @@ class OrgArtifact(Base):
     status: Mapped[OrgArtifactStatus] = mapped_column(Enum(OrgArtifactStatus, name="org_artifact_status"), nullable=False, default=OrgArtifactStatus.missing)
     current_file_version_id: Mapped[int | None] = mapped_column(ForeignKey("file_versions.id", ondelete="SET NULL"), nullable=True)
 
+    # Аудит (к какой версии относится "проверено" + кто/когда)
+    audited_file_version_id: Mapped[int | None] = mapped_column(ForeignKey("file_versions.id", ondelete="SET NULL"), nullable=True)
+    audited_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    audited_by_user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)
     updated_by_user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
@@ -128,6 +133,8 @@ class OrgArtifact(Base):
     org: Mapped[Organization] = relationship()
     artifact: Mapped[Artifact] = relationship()
     current_file_version: Mapped["FileVersion | None"] = relationship(foreign_keys=[current_file_version_id], post_update=True)
+    audited_file_version: Mapped["FileVersion | None"] = relationship(foreign_keys=[audited_file_version_id], post_update=True)
+    audited_by: Mapped["User | None"] = relationship(foreign_keys=[audited_by_user_id])
     # Между org_artifacts и file_versions есть два FK-пути (org_artifact_id и current_file_version_id),
     # поэтому явно указываем, какой FK использовать для коллекции версий.
     versions: Mapped[list["FileVersion"]] = relationship(
@@ -161,6 +168,23 @@ class FileVersion(Base):
         back_populates="versions",
         foreign_keys=[org_artifact_id],
     )
+
+
+class FilePreview(Base):
+    __tablename__ = "file_previews"
+    __table_args__ = (UniqueConstraint("file_version_id", name="uq_file_previews_file_version_id"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    file_version_id: Mapped[int] = mapped_column(ForeignKey("file_versions.id", ondelete="CASCADE"), nullable=False, index=True)
+
+    preview_mime: Mapped[str] = mapped_column(String(255), nullable=False, default="application/pdf")
+    preview_size_bytes: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    preview_sha256: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    preview_blob: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)
+    last_error: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    last_error_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class OrgArtifactComment(Base):

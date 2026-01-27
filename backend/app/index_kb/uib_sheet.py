@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 
 from openpyxl import load_workbook
-from sqlalchemy import case, func
+from sqlalchemy import and_, case, func
 from sqlalchemy.orm import joinedload
 from sqlalchemy.orm import Session
 
@@ -136,7 +136,7 @@ def get_uib_template(path: str) -> UibTemplate:
 def compute_auto_scores(db: Session, org_id: int, short_names: list[str]) -> dict[str, float]:
     """
     Auto-score rule (requested):
-    - if artifact exists and all points uploaded => 5
+    - if artifact exists and all points are AUDITED (audited_file_version_id == current_file_version_id) => 5
     - else => 0
     """
     if not short_names:
@@ -155,17 +155,27 @@ def compute_auto_scores(db: Session, org_id: int, short_names: list[str]) -> dic
     if not existing:
         return {}
 
-    uploaded_flag = case((OrgArtifact.status == OrgArtifactStatus.uploaded, 1), else_=0)
+    audited_flag = case(
+        (
+            and_(
+                OrgArtifact.current_file_version_id.isnot(None),
+                OrgArtifact.audited_file_version_id.isnot(None),
+                OrgArtifact.audited_file_version_id == OrgArtifact.current_file_version_id,
+            ),
+            1,
+        ),
+        else_=0,
+    )
     rows = (
-        db.query(func.upper(Artifact.short_name).label("sn"), func.min(uploaded_flag).label("all_uploaded"))
+        db.query(func.upper(Artifact.short_name).label("sn"), func.min(audited_flag).label("all_audited"))
         .join(OrgArtifact, OrgArtifact.artifact_id == Artifact.id)
         .filter(OrgArtifact.org_id == org_id, Artifact.short_name != "", func.upper(Artifact.short_name).in_(sorted(existing)))
         .group_by(func.upper(Artifact.short_name))
         .all()
     )
     out: dict[str, float] = {}
-    for sn_u, all_uploaded in rows:
-        out[str(sn_u).upper()] = 5.0 if int(all_uploaded or 0) == 1 else 0.0
+    for sn_u, all_audited in rows:
+        out[str(sn_u).upper()] = 5.0 if int(all_audited or 0) == 1 else 0.0
     # If exists in справочнике but нет org_artifacts (не материализовано) — считаем 0
     for sn_u in existing:
         out.setdefault(sn_u, 0.0)

@@ -58,5 +58,136 @@
         });
       })();
     </script>
+    <script>
+      (function () {
+        // Progressive enhancement: searchable org selector from a plain <select>.
+        // Opt-in via: <select data-org-autocomplete="1" ...>.
+        function initSelectAutocomplete(selectEl) {
+          if (!selectEl || selectEl.__autocomplete_inited) return;
+          selectEl.__autocomplete_inited = true;
+
+          // Collect options (flatten optgroups)
+          var opts = [];
+          Array.prototype.forEach.call(selectEl.options || [], function (o) {
+            if (!o) return;
+            opts.push({ id: String(o.value || ""), label: (o.textContent || "").trim() });
+          });
+
+          var combo = document.createElement("div");
+          combo.className = "combo";
+
+          var wrap = document.createElement("div");
+          wrap.className = "combo-input-wrap";
+
+          var inp = document.createElement("input");
+          inp.className = "combo-input";
+          inp.type = "text";
+          inp.autocomplete = "off";
+          inp.placeholder = selectEl.getAttribute("data-placeholder") || "Поиск...";
+
+          var caret = document.createElement("span");
+          caret.className = "combo-caret";
+          caret.textContent = "▾";
+
+          wrap.appendChild(inp);
+          wrap.appendChild(caret);
+
+          var pop = document.createElement("div");
+          pop.className = "combo-popover";
+          pop.hidden = true;
+
+          var list = document.createElement("div");
+          list.className = "combo-list";
+          list.setAttribute("role", "listbox");
+          pop.appendChild(list);
+
+          combo.appendChild(wrap);
+          combo.appendChild(pop);
+
+          // Place combo before select; move select into combo for easier outside-click handling.
+          selectEl.parentNode.insertBefore(combo, selectEl);
+          combo.appendChild(selectEl);
+
+          // Hide original select only when JS is active (so noscript keeps native select).
+          selectEl.style.display = "none";
+
+          function selectedLabel() {
+            try {
+              var o = selectEl.options[selectEl.selectedIndex];
+              return o ? (o.textContent || "").trim() : "";
+            } catch (e) {
+              return "";
+            }
+          }
+
+          function open() {
+            pop.hidden = false;
+            render(inp.value || "");
+          }
+          function close() {
+            pop.hidden = true;
+          }
+          function isOpen() {
+            return pop.hidden === false;
+          }
+
+          function setSelected(id, label) {
+            selectEl.value = String(id || "");
+            inp.value = label || "";
+            close();
+            if (selectEl.getAttribute("data-auto-submit") === "1" && selectEl.form) {
+              try { selectEl.form.submit(); } catch (e) {}
+            }
+          }
+
+          function render(q) {
+            var query = String(q || "").trim().toLowerCase();
+            var items = query
+              ? opts.filter(function (it) { return (it.label || "").toLowerCase().indexOf(query) >= 0; })
+              : opts.slice();
+
+            list.innerHTML = "";
+            var cur = String(selectEl.value || "");
+            items.forEach(function (it) {
+              var row = document.createElement("div");
+              row.className = "combo-option" + (String(it.id) === cur ? " combo-option--active" : "");
+              row.setAttribute("role", "option");
+              row.setAttribute("aria-selected", String(it.id) === cur ? "true" : "false");
+              row.textContent = it.label;
+              row.addEventListener("mousedown", function (e) {
+                e.preventDefault(); // prevent blur before selection
+                setSelected(it.id, it.label);
+              });
+              list.appendChild(row);
+            });
+          }
+
+          // init input value from current selection
+          inp.value = selectedLabel();
+
+          inp.addEventListener("focus", open);
+          inp.addEventListener("click", open);
+          inp.addEventListener("input", function () {
+            // typing does not change selection until click on option
+            open();
+          });
+          inp.addEventListener("keydown", function (e) {
+            if (e.key === "Escape") {
+              e.preventDefault();
+              close();
+            }
+          });
+
+          document.addEventListener("click", function (e) {
+            if (!isOpen()) return;
+            if (!combo.contains(e.target)) close();
+          });
+        }
+
+        document.querySelectorAll("select[data-org-autocomplete='1']").forEach(function (sel) {
+          initSelectAutocomplete(sel);
+        });
+      })();
+    </script>
   </body>
 </html>

@@ -6,16 +6,25 @@
       <div class="muted">Навигация по папкам строится из “Сокращенного” (например: ВССТ.КМНК.1 → ВССТ/КМНК/1).</div>
     </div>
     <div class="row-right">
+      {% if orgs and orgs|length > 1 %}
+        <form method="get" action="/my/files" style="display:inline">
+          <select name="org_id" data-org-autocomplete="1" data-auto-submit="1" data-placeholder="Поиск организации…">
+            {% for o in orgs %}
+              <option value="{{ o.id }}" {% if o.id == selected_org_id %}selected{% endif %}>{{ o.name }}</option>
+            {% endfor %}
+          </select>
+        </form>
+      {% endif %}
       <a class="btn btn-secondary" href="/my/artifacts">К артефактам</a>
     </div>
   </div>
 
   <div class="card">
     <div class="breadcrumb">
-      <a class="breadcrumb-link" href="/my/files">Корень</a>
+      <a class="breadcrumb-link" href="/my/files?org_id={{ selected_org_id }}">Корень</a>
       {% for c in crumbs %}
         <span class="muted">/</span>
-        <a class="breadcrumb-link" href="/my/files?path={{ c.path }}">{{ c.name }}</a>
+        <a class="breadcrumb-link" href="/my/files?org_id={{ selected_org_id }}&path={{ c.path }}">{{ c.name }}</a>
       {% endfor %}
     </div>
   </div>
@@ -25,7 +34,7 @@
       <h3>Папки</h3>
       <div class="folder-grid">
         {% for name, cnt in folders %}
-          <a class="folder-card" href="/my/files?path={{ (path ~ '/' if path else '') ~ name }}">
+          <a class="folder-card" href="/my/files?org_id={{ selected_org_id }}&path={{ (path ~ '/' if path else '') ~ name }}">
             <div class="folder-icon">📁</div>
             <div class="folder-name mono">{{ name }}</div>
             <div class="muted">элементов: {{ cnt }}</div>
@@ -49,6 +58,7 @@
               <th>Пункт</th>
               <th>Артефакт</th>
               <th class="col-status">Статус</th>
+              <th class="col-status">Аудит</th>
               <th>Файл</th>
               <th>Дата загрузки</th>
               <th>Кто загрузил</th>
@@ -69,6 +79,17 @@
                     <span class="badge">Загружен</span>
                   {% else %}
                     <span class="badge badge-danger">Не загружен</span>
+                  {% endif %}
+                </td>
+                <td class="col-status">
+                  <span
+                    class="{{ r.audit_class }}"
+                    {% if r.comment_text %}
+                      title="Комментарий аудитора: {{ r.comment_by }} · {{ r.comment_at|dt }}&#10;{{ r.comment_text|replace('\n',' ') }}"
+                    {% endif %}
+                  >{{ r.audit_label }}</span>
+                  {% if r.audit_label == "Проаудировано" and r.oa.audited_at %}
+                    <div class="muted mono" style="margin-top:4px">{{ r.oa.audited_at|dt }}{% if r.audited_by %} · {{ r.audited_by }}{% endif %}</div>
                   {% endif %}
                 </td>
                 <td class="mono">

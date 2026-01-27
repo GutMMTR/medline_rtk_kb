@@ -1,0 +1,184 @@
+{% extends "base.html" %}
+{% block content %}
+  <div class="section-header">
+    <div>
+      <h2 style="margin:0">Журнал действий</h2>
+      <div class="muted">Все изменения в системе: кто, когда и что менял.</div>
+    </div>
+    <div class="row-right">
+      <a class="btn btn-secondary" href="/admin">Назад</a>
+    </div>
+  </div>
+
+  <div class="card">
+    <form method="get" action="/admin/audit" class="grid filter-form" style="grid-template-columns: repeat(6, minmax(0, 1fr)); align-items:end;">
+      <div style="grid-column: span 2">
+        <label>Пользователь</label>
+        <select name="actor_user_id">
+          <option value="" {% if not filters.actor_user_id %}selected{% endif %}>Все</option>
+          {% for u in users %}
+            <option value="{{ u.id }}" {% if filters.actor_user_id and u.id == filters.actor_user_id %}selected{% endif %}>{{ u.login }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div style="grid-column: span 2">
+        <label>Организация</label>
+        <select name="org_id">
+          <option value="" {% if not filters.org_id %}selected{% endif %}>Все</option>
+          {% for o in orgs %}
+            <option value="{{ o.id }}" {% if filters.org_id and o.id == filters.org_id %}selected{% endif %}>{{ o.name }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div>
+        <label>Действие</label>
+        <select name="action">
+          <option value="" {% if not filters.action %}selected{% endif %}>Все</option>
+          {% for a in actions %}
+            <option value="{{ a }}" {% if filters.action == a %}selected{% endif %}>{{ action_labels.get(a, a) }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div>
+        <label>Объект</label>
+        <select name="entity_type">
+          <option value="" {% if not filters.entity_type %}selected{% endif %}>Все</option>
+          {% for t in entity_types %}
+            <option value="{{ t }}" {% if filters.entity_type == t %}selected{% endif %}>{{ entity_type_labels.get(t, t) }}</option>
+          {% endfor %}
+        </select>
+      </div>
+
+      <div style="grid-column: span 2">
+        <label>Дата от</label>
+        <input type="date" name="date_from" value="{{ filters.date_from }}" />
+      </div>
+      <div style="grid-column: span 2">
+        <label>Дата до</label>
+        <input type="date" name="date_to" value="{{ filters.date_to }}" />
+      </div>
+      <div>
+        <label>На странице</label>
+        <select name="page_size">
+          {% for n in [10,20,50,100,200] %}
+            <option value="{{ n }}" {% if page_size == n %}selected{% endif %}>{{ n }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="filter-actions">
+        <button class="btn" type="submit">Применить</button>
+      </div>
+    </form>
+  </div>
+
+  <div class="card">
+    <div class="section-header">
+      <div class="muted">Записей: <b class="mono">{{ total }}</b></div>
+      <div class="muted">Страница: <b class="mono">{{ page }}</b> / <b class="mono">{{ total_pages }}</b></div>
+    </div>
+
+    <div class="table-wrap">
+      <table class="table">
+        <thead>
+          <tr>
+            <th>Время</th>
+            <th>Пользователь</th>
+            <th>Организация</th>
+            <th>Действие</th>
+            <th>Объект</th>
+            <th style="width:120px">ID</th>
+            <th style="min-width:320px">Изменения</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for it in items %}
+            <tr>
+              <td class="mono">{{ it.at|dt }}</td>
+              <td class="mono">{{ it.actor_login or "—" }}</td>
+              <td class="mono">{{ it.org_name or "—" }}</td>
+              <td>
+                <div class="mono">{{ action_labels.get(it.action, it.action) }}</div>
+                {% if it.audit_status %}
+                  <div class="muted">{{ it.audit_status }}</div>
+                {% endif %}
+              </td>
+              <td class="mono">{{ entity_type_labels.get(it.entity_type, it.entity_type) }}</td>
+              <td class="mono audit-id">{{ it.entity_id }}</td>
+              <td>
+                <details>
+                  <summary class="muted">
+                    показать{% if it.changes and it.changes|length > 0 %} · <b>{{ it.changes|length }}</b> изм.{% endif %}{% if it.audit_status %} · <b>{{ it.audit_status }}</b>{% endif %}
+                  </summary>
+
+                  {% if it.changes and it.changes|length > 0 %}
+                    <div class="muted" style="margin-top:8px"><b>Что изменилось</b></div>
+                    <div class="table-wrap" style="margin-top:6px">
+                      <table class="table audit-diff-table">
+                        <thead>
+                          <tr>
+                            <th style="width:220px">Поле</th>
+                            <th>Было</th>
+                            <th>Стало</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {% for c in it.changes %}
+                            <tr class="audit-diff-{{ c.kind }}">
+                              <td class="mono">{{ c.key }}</td>
+                              <td class="mono">{{ c.before }}</td>
+                              <td class="mono">{{ c.after }}</td>
+                            </tr>
+                          {% endfor %}
+                        </tbody>
+                      </table>
+                    </div>
+                  {% endif %}
+
+                  {% if it.before %}
+                    <div class="muted" style="margin-top:6px"><b>before</b></div>
+                    <pre class="mono" style="white-space:pre-wrap; margin:6px 0 10px">{{ it.before }}</pre>
+                  {% endif %}
+                  {% if it.after %}
+                    <div class="muted"><b>after</b></div>
+                    <pre class="mono" style="white-space:pre-wrap; margin:6px 0 0">{{ it.after }}</pre>
+                  {% endif %}
+                  <div class="muted" style="margin-top:8px">IP: <span class="mono">{{ it.ip or "—" }}</span></div>
+                </details>
+              </td>
+            </tr>
+          {% endfor %}
+          {% if items|length == 0 %}
+            <tr><td colspan="7" class="muted">Записей нет.</td></tr>
+          {% endif %}
+        </tbody>
+      </table>
+    </div>
+
+    <div class="pagination">
+      <div class="pagination-links">
+        {% set prev_page = page - 1 %}
+        {% set next_page = page + 1 %}
+        <a class="page-chip" href="/admin/audit?{{ base_query }}&page=1">⟪</a>
+        <a class="page-chip" href="/admin/audit?{{ base_query }}&page={{ 1 if prev_page < 1 else prev_page }}">←</a>
+        {% for p in page_links %}
+          <a class="page-chip {% if p == page %}page-chip-active{% endif %}" href="/admin/audit?{{ base_query }}&page={{ p }}">{{ p }}</a>
+        {% endfor %}
+        <a class="page-chip" href="/admin/audit?{{ base_query }}&page={{ total_pages if next_page > total_pages else next_page }}">→</a>
+        <a class="page-chip" href="/admin/audit?{{ base_query }}&page={{ total_pages }}">⟫</a>
+      </div>
+      <form method="get" action="/admin/audit" class="pagination-jump">
+        <input type="hidden" name="actor_user_id" value="{{ filters.actor_user_id or '' }}" />
+        <input type="hidden" name="org_id" value="{{ filters.org_id or '' }}" />
+        <input type="hidden" name="action" value="{{ filters.action or '' }}" />
+        <input type="hidden" name="entity_type" value="{{ filters.entity_type or '' }}" />
+        <input type="hidden" name="date_from" value="{{ filters.date_from or '' }}" />
+        <input type="hidden" name="date_to" value="{{ filters.date_to or '' }}" />
+        <input type="hidden" name="page_size" value="{{ page_size }}" />
+        <span class="muted">Перейти к</span>
+        <input name="page" value="{{ page }}" style="width: 90px" />
+        <button class="btn btn-secondary" type="submit">OK</button>
+      </form>
+    </div>
+  </div>
+{% endblock %}
+

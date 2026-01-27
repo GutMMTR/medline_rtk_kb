@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+{% block content %}
+  <div class="section-header">
+    <div>
+      <h2 style="margin:0">Создать пользователя</h2>
+      <div class="muted">Создание нового пользователя (логин/пароль/права).</div>
+    </div>
+    <div class="row-right">
+      <a class="btn btn-secondary" href="/admin/users">К списку</a>
+      <a class="btn btn-secondary" href="/admin">Назад</a>
+    </div>
+  </div>
+
+  <div class="card">
+    {% if error %}
+      <div class="error">{{ error }}</div>
+    {% endif %}
+    <form method="post" action="/admin/users" class="grid">
+      <div>
+        <label>Логин</label>
+        <input name="login" value="{{ form.login or '' }}" required />
+      </div>
+      <div>
+        <label>Пароль</label>
+        <input name="password" type="password" minlength="8" required placeholder="Минимум 8 символов, стр/загл, цифра, спецсимвол" />
+        <div class="hint">Требования: 8+ символов, строчные/заглавные, цифра, спецсимвол.</div>
+      </div>
+      <div>
+        <label>ФИО (опц.)</label>
+        <input name="full_name" value="{{ form.full_name or '' }}" />
+      </div>
+      <div>
+        <label>Админ</label>
+        <select name="is_admin">
+          <option value="false" {% if not form.is_admin %}selected{% endif %}>нет</option>
+          <option value="true" {% if form.is_admin %}selected{% endif %}>да</option>
+        </select>
+      </div>
+      <div class="filter-actions" style="grid-column: span 2">
+        <button class="btn" type="submit">Создать</button>
+      </div>
+    </form>
+  </div>
+{% endblock %}
+

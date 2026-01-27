@@ -13,7 +13,7 @@
   <div class="card">
     <form method="get" action="/">
       <label>Организация</label>
-      <select name="org_id" onchange="this.form.submit()">
+      <select name="org_id" onchange="this.form.submit()" data-org-autocomplete="1" data-auto-submit="1" data-placeholder="Поиск организации…">
         {% for o in orgs %}
           <option value="{{ o.id }}" {% if o.id == selected_org_id %}selected{% endif %}>{{ o.name }}</option>
         {% endfor %}

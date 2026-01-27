@@ -8,12 +8,22 @@
       </div>
     </div>
     <div class="row-right">
+      {% if orgs and orgs|length > 1 %}
+        <form method="get" action="/my/artifacts" style="display:inline">
+          <select name="org_id" data-org-autocomplete="1" data-auto-submit="1" data-placeholder="Поиск организации…">
+            {% for o in orgs %}
+              <option value="{{ o.id }}" {% if o.id == selected_org_id %}selected{% endif %}>{{ o.name }}</option>
+            {% endfor %}
+          </select>
+        </form>
+      {% endif %}
       <a class="btn btn-secondary" href="/my/files">К файлам</a>
     </div>
   </div>
 
   <div class="card">
     <form method="get" action="/my/artifacts" class="grid filter-form filter-form--status">
+      <input type="hidden" name="org_id" value="{{ selected_org_id }}" />
       <div class="filter-q">
         <label>Поиск (показатель/артефакт)</label>
         <input name="q" value="{{ q or '' }}" placeholder="например: лицензии / конфигурации" />
@@ -53,6 +63,15 @@
           <option value="uploaded" {% if status == "uploaded" %}selected{% endif %}>Загружен</option>
         </select>
       </div>
+      <div class="filter-status">
+        <label>Аудит</label>
+        <select name="audit">
+          <option value="" {% if not audit %}selected{% endif %}>(все)</option>
+          <option value="needs" {% if audit == "needs" %}selected{% endif %}>Требует аудита</option>
+          <option value="audited" {% if audit == "audited" %}selected{% endif %}>Проаудировано</option>
+          <option value="changed" {% if audit == "changed" %}selected{% endif %}>Изменён</option>
+        </select>
+      </div>
       <div class="filter-short">
         <label>Сокращенное наименование (точно)</label>
         <input name="short_name" value="{{ short_name or '' }}" placeholder="например: СЗИ.2FA.1" />
@@ -88,6 +107,7 @@
             <th>КБ</th>
             <th>Артефакт</th>
             <th class="col-status">Статус</th>
+            <th class="col-status">Аудит</th>
             <th>Файл</th>
             <th>Загрузить</th>
             <th class="th-actions-wide"></th>
@@ -118,6 +138,17 @@
                       title="Комментарий аудитора: {{ r.comment_by }} · {{ r.comment_at|dt }}&#10;{{ r.comment_text|replace('\n',' ') }}"
                     {% endif %}
                   >Не загружен</span>
+                {% endif %}
+              </td>
+              <td class="col-status">
+                <span
+                  class="{{ r.audit_class }}"
+                  {% if r.comment_text %}
+                    title="Комментарий аудитора: {{ r.comment_by }} · {{ r.comment_at|dt }}&#10;{{ r.comment_text|replace('\n',' ') }}"
+                  {% endif %}
+                >{{ r.audit_label }}</span>
+                {% if r.audit_label == "Проаудировано" and r.oa.audited_at %}
+                  <div class="muted mono" style="margin-top:4px">{{ r.oa.audited_at|dt }}{% if r.audited_by %} · {{ r.audited_by }}{% endif %}</div>
                 {% endif %}
               </td>
               <td class="mono">
@@ -159,7 +190,7 @@
             </tr>
           {% endfor %}
           {% if rows|length == 0 %}
-            <tr><td colspan="11" class="muted">Нет артефактов. Попросите администратора импортировать справочник.</td></tr>
+            <tr><td colspan="12" class="muted">Нет артефактов. Попросите администратора импортировать справочник.</td></tr>
           {% endif %}
         </tbody>
       </table>

@@ -1,0 +1,98 @@
+{% extends "base.html" %}
+{% block content %}
+  <div class="section-header">
+    <div>
+      <h2 style="margin:0">Просмотр файла</h2>
+      <div class="muted">
+        Организация: <span class="mono">{{ org.name }}</span> ·
+        Сокращенное: <span class="mono">{{ a.short_name }}</span> ·
+        Пункт: <span class="mono">{% if a.achievement_item_no %}{{ a.achievement_item_no }}{% else %}—{% endif %}</span>
+      </div>
+    </div>
+    <div class="row-right">
+      <a class="btn btn-secondary" href="{{ back_url }}">Назад</a>
+      {% if oa.current_file_version_id %}
+        <a class="btn btn-secondary" href="/auditor/org_artifacts/{{ oa.id }}/download" title="Скачать файл">Скачать</a>
+      {% endif %}
+    </div>
+  </div>
+
+  <div class="card" style="display:grid; grid-template-columns: 1.6fr 420px; gap: 14px; align-items:start;">
+    <div>
+      <div class="section-header" style="margin-bottom:10px">
+        <div>
+          <h3 style="margin:0">Предпросмотр</h3>
+          {% if filename %}
+            <div class="muted mono" style="margin-top:4px">{{ filename }}</div>
+          {% endif %}
+        </div>
+      </div>
+
+      {% if preview_error %}
+        <div class="muted">
+          Предпросмотр недоступен: <span class="mono">{{ preview_error }}</span>.
+          Используйте “Скачать”.
+        </div>
+      {% elif viewer_kind == "none" %}
+        <div class="muted">Файла нет.</div>
+      {% elif viewer_kind == "image" %}
+        <div class="table-wrap">
+          <img src="{{ content_url }}" alt="preview" style="max-width:100%; height:auto; border:1px solid var(--border); border-radius: 12px;" />
+        </div>
+      {% elif viewer_kind == "pdf" %}
+        <iframe src="{{ content_url }}" style="width:100%; height: 72vh; border:1px solid var(--border); border-radius: 12px;"></iframe>
+      {% elif viewer_kind == "audio" %}
+        <audio src="{{ content_url }}" controls style="width:100%"></audio>
+      {% elif viewer_kind == "video" %}
+        <video src="{{ content_url }}" controls style="width:100%; max-height: 72vh; border:1px solid var(--border); border-radius: 12px;"></video>
+      {% elif viewer_kind == "text" %}
+        <iframe src="{{ content_url }}" style="width:100%; height: 72vh; border:1px solid var(--border); border-radius: 12px;"></iframe>
+      {% else %}
+        <div class="muted">
+          Предпросмотр пока недоступен для типа: <span class="mono">{{ content_type or "—" }}</span>.
+          Используйте “Скачать”.
+        </div>
+      {% endif %}
+    </div>
+
+    <div>
+      <div class="section-header" style="margin-bottom:10px">
+        <h3 style="margin:0">Действия</h3>
+      </div>
+
+      <div style="margin-bottom: 10px">
+        {% if not oa.current_file_version_id %}
+          <span class="badge badge-danger">Нет файла</span>
+        {% elif oa.audited_file_version_id and oa.audited_file_version_id == oa.current_file_version_id %}
+          <span class="badge">Проаудировано</span>
+          {% if oa.audited_at %}
+            <div class="muted mono" style="margin-top:4px">{{ oa.audited_at|dt }}</div>
+          {% endif %}
+        {% elif oa.audited_file_version_id %}
+          <span class="badge badge-warn">Изменён</span>
+        {% else %}
+          <span class="badge badge-warn">Требует аудита</span>
+        {% endif %}
+      </div>
+
+      {% if oa.current_file_version_id and (not oa.audited_file_version_id or oa.audited_file_version_id != oa.current_file_version_id) %}
+        <form method="post" action="/auditor/org_artifacts/{{ oa.id }}/audit" style="margin-bottom: 12px">
+          <input type="hidden" name="back" value="{{ current_url }}" />
+          <button class="btn" type="submit">Проверено</button>
+        </form>
+      {% endif %}
+
+      <div class="muted" style="margin-bottom:8px">Комментарий аудитора</div>
+      <form method="post" action="/auditor/org_artifacts/{{ oa.id }}/comment">
+        <input type="hidden" name="org_id" value="{{ oa.org_id }}" />
+        <input type="hidden" name="back" value="{{ current_url }}" />
+        <textarea name="comment" rows="6" class="comment-input" placeholder="Комментарий аудитора..."></textarea>
+        <div class="comment-actions" style="margin-top:8px; justify-content:space-between; align-items:center; gap: 10px;">
+          <a class="btn btn-secondary" href="/auditor/org_artifacts/{{ oa.id }}/history?back={{ current_url|urlencode }}">История</a>
+          <button class="btn btn-secondary" type="submit">Сохранить</button>
+        </div>
+      </form>
+    </div>
+  </div>
+{% endblock %}
+
