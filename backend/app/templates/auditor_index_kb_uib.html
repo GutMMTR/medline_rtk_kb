@@ -1,0 +1,132 @@
+{% extends "base.html" %}
+{% block content %}
+  <div class="section-header">
+    <div>
+      <h2 style="margin:0">Индекс КБ · {{ sheet_name }}</h2>
+      <div class="muted">Упрощённая форма: КБ1/КБ2/КБ3 заполняются одинаково по статусу артефакта (5/0). Если сокращение не найдено — ввод вручную.</div>
+    </div>
+    <div class="row-right">
+      <form method="get" action="/auditor/index-kb/uib" class="header-inline-form">
+        <label style="margin:0">Организация</label>
+        <select name="org_id" onchange="this.form.submit()">
+          {% for o in orgs %}
+            <option value="{{ o.id }}" {% if o.id == selected_org_id %}selected{% endif %}>{{ o.name }}</option>
+          {% endfor %}
+        </select>
+      </form>
+      <a class="btn btn-secondary" href="/auditor/index-kb?org_id={{ selected_org_id }}&sheet={{ sheet_name }}">Оригинал Excel</a>
+      <a class="btn btn-secondary" href="/auditor/artifacts?org_id={{ selected_org_id }}">Артефакты</a>
+      <a class="btn btn-secondary" href="/auditor/files?org_id={{ selected_org_id }}">Файлы</a>
+    </div>
+  </div>
+
+  {% if error %}
+    <div class="card">
+      <div class="error">{{ error }}</div>
+      <div class="hint">Ожидаем файл по пути: <span class="mono">{{ template_path }}</span> (монтируется из <span class="mono">docs/</span>).</div>
+    </div>
+  {% else %}
+    <div class="card">
+      <div class="section-header" style="margin-bottom:10px">
+        <h3 style="margin:0">Итоговая таблица</h3>
+        <div class="muted">Средние значения по категориям (как в Excel).</div>
+      </div>
+      <div class="table-wrap">
+        <table class="table">
+          <thead>
+            <tr>
+              <th style="min-width:360px">Категория</th>
+              <th style="width:160px">Сокращенное наименование</th>
+              <th class="kb-head kb-kb3">КБ3</th>
+              <th class="kb-head kb-kb2">КБ2</th>
+              <th class="kb-head kb-kb1">КБ1</th>
+              <th style="width:190px">Расчетный показатель 2025</th>
+              <th style="width:160px">Текущий показатель</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for s in summary_rows %}
+              <tr>
+                <td><b>{{ s.title }}</b></td>
+                <td class="mono">{{ s.short_name }}</td>
+                <td class="kb-cell kb-kb3">{% if s.kb3 is not none %}{{ "%.2f"|format(s.kb3) }}{% else %}—{% endif %}</td>
+                <td class="kb-cell kb-kb2">{% if s.kb2 is not none %}{{ "%.2f"|format(s.kb2) }}{% else %}—{% endif %}</td>
+                <td class="kb-cell kb-kb1">{% if s.kb1 is not none %}{{ "%.2f"|format(s.kb1) }}{% else %}—{% endif %}</td>
+                <td>{% if s.calc_2025 is not none %}{{ "%.2f"|format(s.calc_2025) }}{% else %}—{% endif %}</td>
+                <td>{% if s.current is not none %}{{ "%.2f"|format(s.current) }}{% else %}—{% endif %}</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="table-wrap">
+        <table class="table">
+          <thead>
+            <tr>
+              <th style="min-width:520px">Требование</th>
+              <th style="width:160px">Сокращение</th>
+              <th class="kb-head kb-kb3">КБ3</th>
+              <th class="kb-head kb-kb2">КБ2</th>
+              <th class="kb-head kb-kb1">КБ1</th>
+              <th class="th-actions"></th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for r in rows %}
+              {% if r.row.kind == "group" %}
+                <tr class="kb-group-row">
+                  <td colspan="6">
+                    <b>{{ r.row.title }}</b>
+                    <span class="muted mono" style="margin-left:10px">{{ r.row.short_name }}</span>
+                  </td>
+                </tr>
+              {% else %}
+                <tr>
+                  <td>{{ r.row.title }}</td>
+                  <td class="mono">{{ r.row.short_name }}</td>
+
+                  {% if r.is_auto %}
+                    <td class="kb-cell kb-kb3"><span class="kb-val">{{ r.value|int }}</span></td>
+                    <td class="kb-cell kb-kb2"><span class="kb-val">{{ r.value|int }}</span></td>
+                    <td class="kb-cell kb-kb1"><span class="kb-val">{{ r.value|int }}</span></td>
+                    <td class="td-actions">
+                      <span class="muted" title="Заполняется автоматически по статусу артефакта">auto</span>
+                    </td>
+                  {% else %}
+                    <td class="kb-cell kb-kb3">
+                      <form method="post" action="/auditor/index-kb/uib/manual" class="kb-form">
+                        <input type="hidden" name="org_id" value="{{ selected_org_id }}" />
+                        <input type="hidden" name="row_key" value="{{ r.row.row_key }}" />
+                        <input class="kb-input" name="value" type="number" min="0" max="5" step="0.1" value="{% if r.value is not none %}{{ r.value }}{% endif %}" placeholder="—" />
+                        <button class="icon-btn" type="submit" title="Сохранить" aria-label="Сохранить">
+                          <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" focusable="false">
+                            <path fill="currentColor" d="M17 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V7l-4-4zM6 8V5h9v3H6z"/>
+                            <path fill="currentColor" d="M16 9v6h2l-3 3-3-3h2V9h2z"/>
+                          </svg>
+                        </button>
+                      </form>
+                      {% if r.source == "manual" %}
+                        <div class="muted" style="margin-top:4px; font-size:12px">
+                          {{ r.updated_by }} · {{ r.updated_at|dt }}
+                        </div>
+                      {% endif %}
+                    </td>
+                    <td class="kb-cell kb-kb2"><span class="kb-val">{% if r.value is not none %}{{ r.value }}{% else %}—{% endif %}</span></td>
+                    <td class="kb-cell kb-kb1"><span class="kb-val">{% if r.value is not none %}{{ r.value }}{% else %}—{% endif %}</span></td>
+                    <td class="td-actions">
+                      <span class="muted" title="Нет такого сокращения в справочнике артефактов — ввод вручную">manual</span>
+                    </td>
+                  {% endif %}
+                </tr>
+              {% endif %}
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  {% endif %}
+{% endblock %}
+

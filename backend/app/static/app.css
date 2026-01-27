@@ -191,8 +191,67 @@ th { color:#344054; font-size: 12px; text-transform: uppercase; letter-spacing: 
 }
 .admin-tile-title{ font-weight: 800; margin: 1px 0 4px; }
 .admin-tile-desc{ color: var(--muted); font-size: 13px; line-height: 1.35; }
+.admin-tile--disabled{
+  opacity: .65;
+  cursor: not-allowed;
+  user-select: none;
+  pointer-events: none;
+  position: relative;
+}
+.admin-tile--disabled:hover{ transform: none; box-shadow: var(--shadow); }
+
+/* Index KB (UIB simplified table) */
+.kb-head{ text-align:center; }
+.kb-cell{ text-align:center; font-weight: 800; }
+.kb-kb3{ background: rgba(18,183,106,.14); }
+.kb-kb2{ background: rgba(247,144,9,.16); }
+.kb-kb1{ background: rgba(155,81,224,.14); }
+.kb-val{ display:inline-block; min-width: 26px; }
+.kb-form{ display:flex; align-items:center; justify-content:center; gap: 8px; }
+.kb-input{ width: 92px; text-align:center; padding: 8px 10px; border-radius: 10px; }
+.kb-group-row td{ background: #F2F4F7; border-bottom-color: var(--border); }
 
 /* Index KB */
+.indexkb-admin-grid{ grid-template-columns: repeat(2, minmax(0, 1fr)); }
+@media (min-width: 980px){
+  .indexkb-admin-grid{ grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
+.indexkb-soon-badge{
+  position:absolute;
+  top: 10px;
+  right: 10px;
+  background: rgba(16,24,40,.06);
+  border: 1px solid rgba(16,24,40,.10);
+  color: rgba(16,24,40,.75);
+  border-radius: 999px;
+  padding: 2px 8px;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.indexkb-sheet-grid{
+  display:grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+@media (min-width: 980px){
+  .indexkb-sheet-grid{ grid-template-columns: repeat(4, minmax(0, 1fr)); }
+}
+.indexkb-sheet-tile{
+  display:block;
+  padding: 12px 12px;
+  border-radius: 14px;
+  border: 1px solid var(--border);
+  background: #fff;
+  text-decoration:none;
+  color: var(--text);
+  box-shadow: 0 4px 14px rgba(16,24,40,.06);
+}
+.indexkb-sheet-tile:hover{ background: rgba(107,45,255,.04); border-color: rgba(107,45,255,.25); }
+.indexkb-sheet-tile-active{ border-color: rgba(107,45,255,.45); box-shadow: 0 8px 18px rgba(107,45,255,.12); }
+.indexkb-sheet-title{ font-weight: 800; }
+.indexkb-sheet-sub{ font-size: 12px; margin-top: 4px; }
+
 .indexkb-tabs { display:flex; gap: 8px; flex-wrap: wrap; }
 .indexkb-tab { display:inline-flex; align-items:center; height: 34px; padding: 0 12px; border-radius: 999px; border: 1px solid #d0d5dd; background:#fff; color:#101828; text-decoration:none; font-weight: 600; }
 .indexkb-tab:hover { background:#f2f4f7; }

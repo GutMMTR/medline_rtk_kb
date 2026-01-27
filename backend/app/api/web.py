@@ -41,6 +41,7 @@ from app.index_kb.excel_fill import fill_workbook_for_org
 from app.index_kb.formula_eval import build_evaluator_from_openpyxl_workbook
 from app.index_kb.sheet_render import iter_render_rows
 from app.index_kb.template_loader import get_index_kb_template
+from app.index_kb.uib_sheet import UIB_SHEET_NAME, build_uib_view, upsert_manual_value
 from app.integrations.nextcloud_dav import NextcloudDavClient, build_webdav_base_url
 from app.integrations.nextcloud_sync import sync_from_nextcloud
 
@@ -1071,7 +1072,9 @@ def auditor_index_kb_page(
     sheet: str | None = None,
     q: str | None = None,
 ) -> HTMLResponse:
-    orgs = _get_accessible_orgs_for_auditor(db, user)
+    orgs_all = _get_accessible_orgs_for_auditor(db, user)
+    # Default — служебная организация, в UI Индекс КБ не показываем, если есть другие.
+    orgs = [o for o in orgs_all if o.name != "Default"] or orgs_all
     if not orgs:
         return templates.TemplateResponse(
             "empty.html",
@@ -1102,59 +1105,6 @@ def auditor_index_kb_page(
 
     tpl = get_index_kb_template(template_path)
     sheet_names = tpl.sheet_names
-    selected_sheet = sheet if sheet in sheet_names else (sheet_names[0] if sheet_names else "")
-    q_hits = q.strip() if q else ""
-
-    # Заполняем workbook значениями "факта" (колонка ввода N в эталоне) по short_name и считаем формулы.
-    wb, rollups_by_sheet = fill_workbook_for_org(template_path, selected_org_id, db)
-    evaluator = build_evaluator_from_openpyxl_workbook(wb)
-
-    # rollups for selected sheet
-    rollups = rollups_by_sheet.get(selected_sheet, {})
-    total_short_names = len(rollups)
-    uploaded_short_names = len([r for r in rollups.values() if r.state == "uploaded"])
-    completion_pct = int(round((uploaded_short_names * 100.0 / total_short_names), 0)) if total_short_names else 0
-
-    ws = wb[selected_sheet]
-
-    # Determine which short_names should be highlighted/filtered
-    state_by_sn = {k: v.state for k, v in rollups.items()}
-
-    def get_cell_text(cell) -> str:
-        v = cell.value
-        if v is None:
-            return ""
-        if isinstance(v, str):
-            txt = v.strip()
-            if txt.startswith("="):
-                # Show computed value if possible
-                try:
-                    val = evaluator.eval(ws.title, cell.coordinate)
-                except Exception:
-                    val = None
-                return "" if val is None else str(val)
-            return txt
-        # numbers/dates
-        return str(v)
-
-    def get_cell_class(cell, text: str) -> str:
-        if not text:
-            return ""
-        # highlight if the whole cell is a token OR contains a token
-        tok = text.strip()
-        if tok.upper() in state_by_sn:
-            st = state_by_sn[tok.upper()]
-            base = "indexkb-cell-token"
-            if st == "uploaded":
-                return f"{base} indexkb-ok"
-            if st == "partial":
-                return f"{base} indexkb-warn"
-            if st == "missing":
-                return f"{base} indexkb-bad"
-            return base
-        return ""
-
-    grid = list(iter_render_rows(ws, get_cell_text=get_cell_text, get_cell_class=get_cell_class, max_cells=30000))
 
     resp = templates.TemplateResponse(
         "auditor_index_kb.html",
@@ -1165,12 +1115,6 @@ def auditor_index_kb_page(
             "orgs": orgs,
             "selected_org_id": selected_org_id,
             "sheet_names": sheet_names,
-            "selected_sheet": selected_sheet,
-            "q": q_hits,
-            "grid": grid,
-            "total_short_names": total_short_names,
-            "uploaded_short_names": uploaded_short_names,
-            "completion_pct": completion_pct,
             "template_path": template_path,
             "error": None,
         },
@@ -1178,6 +1122,87 @@ def auditor_index_kb_page(
     resp.headers["Cache-Control"] = "no-store, max-age=0"
     resp.headers["Pragma"] = "no-cache"
     return resp
+
+
+@router.get("/auditor/index-kb/uib", response_class=HTMLResponse)
+def auditor_index_kb_uib_page(
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+    org_id: int | None = None,
+) -> HTMLResponse:
+    orgs_all = _get_accessible_orgs_for_auditor(db, user)
+    orgs = [o for o in orgs_all if o.name != "Default"] or orgs_all
+    if not orgs:
+        return templates.TemplateResponse(
+            "empty.html",
+            {"request": request, "user": user, "message": "Нет доступных организаций. Обратитесь к администратору."},
+        )
+    selected_org_id = org_id or orgs[0].id
+    _require_auditor_or_admin_for_org(db, user, selected_org_id)
+
+    template_path = settings.index_kb_template_path
+    if not template_path or not os.path.exists(template_path):
+        resp = templates.TemplateResponse(
+            "auditor_index_kb_uib.html",
+            {
+                "request": request,
+                "user": user,
+                "container_class": "container-wide",
+                "orgs": orgs,
+                "selected_org_id": selected_org_id,
+                "template_path": template_path,
+                "error": "Не найден эталонный шаблон Индекс КБ (.xlsx).",
+                "rows": [],
+            },
+            status_code=200,
+        )
+        resp.headers["Cache-Control"] = "no-store, max-age=0"
+        resp.headers["Pragma"] = "no-cache"
+        return resp
+
+    org, tpl, rows = build_uib_view(db, org_id=selected_org_id, template_path=template_path, actor=user)
+    from app.index_kb.uib_sheet import compute_uib_summary
+
+    summary_rows = compute_uib_summary(rows)
+    resp = templates.TemplateResponse(
+        "auditor_index_kb_uib.html",
+        {
+            "request": request,
+            "user": user,
+            "container_class": "container-wide",
+            "orgs": orgs,
+            "selected_org_id": selected_org_id,
+            "org": org,
+            "sheet_name": UIB_SHEET_NAME,
+            "rows": rows,
+            "summary_rows": summary_rows,
+            "error": None,
+        },
+    )
+    resp.headers["Cache-Control"] = "no-store, max-age=0"
+    resp.headers["Pragma"] = "no-cache"
+    return resp
+
+
+@router.post("/auditor/index-kb/uib/manual")
+def auditor_index_kb_uib_save_manual(
+    request: Request,
+    org_id: int = Form(...),
+    row_key: str = Form(...),
+    value: str = Form(""),
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> Response:
+    _require_auditor_or_admin_for_org(db, user, org_id)
+    try:
+        v = float((value or "").strip().replace(",", "."))
+    except Exception:
+        v = 0.0
+    upsert_manual_value(db, org_id=org_id, sheet_name=UIB_SHEET_NAME, row_key=row_key, value=v, actor=user)
+    db.commit()
+    ref = request.headers.get("referer") or f"/auditor/index-kb/uib?org_id={org_id}"
+    return _redirect(ref)
 
 
 @router.get("/auditor/org_artifacts/{org_artifact_id}/download")
@@ -1779,6 +1804,48 @@ def admin_nextcloud_sync(request: Request, db: Session = Depends(get_db), user: 
         )
 
 
+@router.post("/admin/integrations/nextcloud/sync-v2", response_class=HTMLResponse)
+def admin_nextcloud_sync_v2(request: Request, db: Session = Depends(get_db), user: User = Depends(require_admin)) -> HTMLResponse:
+    """
+    New sync (V2): ROOT/Org/03 Артефакты/... (as in docs/03 Артефакты.zip)
+    Old sync remains available.
+    """
+    s = _get_nextcloud_settings(db)
+    if not s.is_enabled:
+        return templates.TemplateResponse(
+            "admin/nextcloud.html",
+            {"request": request, "user": user, "s": s, "error": "Интеграция выключена (включите и сохраните настройки).", "ok": None, "discovered_orgs": None, "stats": None},
+            status_code=400,
+        )
+    try:
+        dav = _dav_from_settings(s)
+        from app.integrations.nextcloud_sync import sync_from_nextcloud_v2
+
+        stats = sync_from_nextcloud_v2(
+            db=db,
+            actor=user,
+            dav=dav,
+            root_folder=s.root_folder,
+            create_orgs=s.create_orgs,
+            request=request,
+        )
+        s.last_sync_at = datetime.utcnow()
+        s.last_error = ""
+        db.commit()
+        return templates.TemplateResponse(
+            "admin/nextcloud.html",
+            {"request": request, "user": user, "s": s, "error": None, "ok": "Синхронизация (V2) завершена.", "discovered_orgs": None, "stats": stats},
+        )
+    except Exception as e:
+        s.last_error = str(e)
+        db.commit()
+        return templates.TemplateResponse(
+            "admin/nextcloud.html",
+            {"request": request, "user": user, "s": s, "error": f"Ошибка синхронизации (V2): {e}", "ok": None, "discovered_orgs": None, "stats": None},
+            status_code=500,
+        )
+
+
 @router.get("/admin/artifacts", response_class=HTMLResponse)
 def admin_artifacts(request: Request, user: User = Depends(require_admin)) -> HTMLResponse:
     return templates.TemplateResponse("admin/artifacts.html", {"request": request, "user": user, "result": None, "error": None})
@@ -2355,13 +2422,23 @@ def admin_users_edit_save(
 
 @router.get("/admin/memberships", response_class=HTMLResponse)
 def admin_memberships(request: Request, db: Session = Depends(get_db), user: User = Depends(require_admin)) -> HTMLResponse:
-    users = db.query(User).order_by(User.login.asc()).all()
-    orgs = db.query(Organization).order_by(Organization.name.asc()).all()
-    memberships = (
+    all_users = db.query(User).order_by(User.login.asc()).all()
+    # "Системные" аккаунты (показываем отдельно): admin (is_admin) и служебный Auditor.
+    system_users = [u for u in all_users if u.is_admin or (u.login or "").strip().lower() in ("admin", "auditor")]
+    users = [u for u in all_users if u not in system_users]
+
+    # Default организация — служебная (нужна системе), но в UI не показываем.
+    orgs = db.query(Organization).filter(Organization.name != "Default").order_by(Organization.name.asc()).all()
+    all_ms = (
         db.query(UserOrgMembership)
+        .join(Organization, Organization.id == UserOrgMembership.org_id)
+        .join(User, User.id == UserOrgMembership.user_id)
         .order_by(UserOrgMembership.created_at.desc())
         .all()
     )
+    system_user_ids = {u.id for u in system_users}
+    system_memberships = [m for m in all_ms if (m.org and m.org.name == "Default") or (m.user_id in system_user_ids)]
+    org_memberships = [m for m in all_ms if m not in system_memberships and (m.org and m.org.name != "Default")]
     role_labels = {"admin": "Администратор", "auditor": "Аудитор", "customer": "Заказчик"}
     return templates.TemplateResponse(
         "admin/memberships.html",
@@ -2369,8 +2446,10 @@ def admin_memberships(request: Request, db: Session = Depends(get_db), user: Use
             "request": request,
             "user": user,
             "users": users,
+            "system_users": system_users,
             "orgs": orgs,
-            "memberships": memberships,
+            "system_memberships": system_memberships,
+            "memberships": org_memberships,
             "roles": [r.value for r in Role],
             "role_labels": role_labels,
             "error": None,
@@ -2387,12 +2466,27 @@ def admin_memberships_create(
     db: Session = Depends(get_db),
     user: User = Depends(require_admin),
 ) -> Response:
+    # Не даём назначать роли на служебную Default организацию.
+    org = db.get(Organization, org_id)
+    if org and org.name == "Default":
+        return _redirect("/admin/memberships")
     try:
         role_enum = Role(role)
     except ValueError:
-        users = db.query(User).order_by(User.login.asc()).all()
-        orgs = db.query(Organization).order_by(Organization.name.asc()).all()
-        memberships = db.query(UserOrgMembership).order_by(UserOrgMembership.created_at.desc()).all()
+        all_users = db.query(User).order_by(User.login.asc()).all()
+        system_users = [u for u in all_users if u.is_admin or (u.login or "").strip().lower() in ("admin", "auditor")]
+        users = [u for u in all_users if u not in system_users]
+        orgs = db.query(Organization).filter(Organization.name != "Default").order_by(Organization.name.asc()).all()
+        all_ms = (
+            db.query(UserOrgMembership)
+            .join(Organization, Organization.id == UserOrgMembership.org_id)
+            .join(User, User.id == UserOrgMembership.user_id)
+            .order_by(UserOrgMembership.created_at.desc())
+            .all()
+        )
+        system_user_ids = {u.id for u in system_users}
+        system_memberships = [m for m in all_ms if (m.org and m.org.name == "Default") or (m.user_id in system_user_ids)]
+        org_memberships = [m for m in all_ms if m not in system_memberships and (m.org and m.org.name != "Default")]
         role_labels = {"admin": "Администратор", "auditor": "Аудитор", "customer": "Заказчик"}
         return templates.TemplateResponse(
             "admin/memberships.html",
@@ -2400,8 +2494,10 @@ def admin_memberships_create(
                 "request": request,
                 "user": user,
                 "users": users,
+                "system_users": system_users,
                 "orgs": orgs,
-                "memberships": memberships,
+                "system_memberships": system_memberships,
+                "memberships": org_memberships,
                 "roles": [r.value for r in Role],
                 "role_labels": role_labels,
                 "error": "Некорректная роль",

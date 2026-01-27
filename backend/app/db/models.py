@@ -3,7 +3,7 @@ from __future__ import annotations
 import enum
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, Enum, ForeignKey, Integer, LargeBinary, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, DateTime, Enum, Float, ForeignKey, Integer, LargeBinary, String, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -260,3 +260,28 @@ class NextcloudRemoteFileState(Base):
     org: Mapped[Organization] = relationship()
     org_artifact: Mapped[OrgArtifact] = relationship()
     imported_file_version: Mapped[FileVersion | None] = relationship()
+
+
+class IndexKbManualValue(Base):
+    """
+    Ручные значения для упрощённого UI Индекса КБ (например, лист "Управление ИБ").
+    Для строк, где short_name отсутствует в справочнике артефактов, значение вводится вручную.
+    """
+
+    __tablename__ = "index_kb_manual_values"
+    __table_args__ = (
+        UniqueConstraint("org_id", "sheet_name", "row_key", name="uq_index_kb_manual_org_sheet_row"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    org_id: Mapped[int] = mapped_column(ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True)
+    sheet_name: Mapped[str] = mapped_column(String(255), nullable=False, default="")
+    row_key: Mapped[str] = mapped_column(String(255), nullable=False, default="")  # stable identifier for the row in template
+
+    value: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)  # 0..5 (может быть дробным)
+
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)
+    updated_by_user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+
+    org: Mapped[Organization] = relationship()
+    updated_by: Mapped["User | None"] = relationship(foreign_keys=[updated_by_user_id])

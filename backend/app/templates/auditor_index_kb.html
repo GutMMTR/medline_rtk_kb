@@ -7,8 +7,6 @@
     </div>
     <div class="row-right">
       <form method="get" action="/auditor/index-kb" class="header-inline-form">
-        <input type="hidden" name="sheet" value="{{ selected_sheet }}" />
-        <input type="hidden" name="q" value="{{ q or '' }}" />
         <label style="margin:0">Организация</label>
         <select name="org_id" onchange="this.form.submit()">
           {% for o in orgs %}
@@ -29,55 +27,42 @@
     </div>
   {% else %}
     <div class="card">
-      <div class="indexkb-tabs">
+      <div class="section-header" style="margin-bottom: 10px">
+        <div>
+          <h3 style="margin:0">Выбор формы</h3>
+        </div>
+        <div class="muted">Всего листов в Excel: {{ sheet_names|length }}</div>
+      </div>
+
+      <div class="admin-grid indexkb-admin-grid">
+        <a class="admin-tile" href="/auditor/index-kb/uib?org_id={{ selected_org_id }}">
+          <div class="admin-tile-icon">
+            <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" focusable="false">
+              <path fill="currentColor" d="M7 2h10v2H7V2zm-2 4h14v16H5V6zm3 3h8v2H8V9zm0 4h8v2H8v-2zm0 4h6v2H8v-2z"/>
+            </svg>
+          </div>
+          <div>
+            <div class="admin-tile-title">Управление ИБ</div>
+          </div>
+        </a>
+
         {% for s in sheet_names %}
-          <a class="indexkb-tab {% if s == selected_sheet %}indexkb-tab-active{% endif %}" href="/auditor/index-kb?org_id={{ selected_org_id }}&sheet={{ s }}&q={{ q|urlencode }}">
-            {{ s }}
-          </a>
+          {% if s != "Управление ИБ" %}
+            <div class="admin-tile admin-tile--disabled" aria-disabled="true" title="В разработке">
+              <div class="admin-tile-icon">
+                <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" focusable="false">
+                  <path fill="currentColor" d="M6 2h9l3 3v17H6V2zm8 1v4h4"/>
+                  <path fill="currentColor" d="M8 10h8v2H8v-2zm0 4h8v2H8v-2z"/>
+                </svg>
+              </div>
+              <div>
+                <div class="admin-tile-title">{{ s }}</div>
+                <div class="admin-tile-desc">Скоро</div>
+              </div>
+              <div class="indexkb-soon-badge">Скоро</div>
+            </div>
+          {% endif %}
         {% endfor %}
-      </div>
-
-      <form method="get" action="/auditor/index-kb" class="grid filter-form filter-form--nostatus" style="margin-top:12px">
-        <input type="hidden" name="org_id" value="{{ selected_org_id }}" />
-        <input type="hidden" name="sheet" value="{{ selected_sheet }}" />
-        <div class="filter-short" style="grid-column: span 5">
-          <label>Поиск по сокращенному</label>
-          <input name="q" value="{{ q or '' }}" placeholder="например: СЗИ.2FA.1" />
-        </div>
-        <div class="filter-actions">
-          <button class="btn" type="submit">Найти</button>
-        </div>
-      </form>
-
-      <div class="muted" style="margin-top:10px">
-        Лист: <b>{{ selected_sheet }}</b> · сокращений: <b>{{ total_short_names }}</b> · заполнено: <b>{{ uploaded_short_names }}</b> ({{ completion_pct }}%)
-      </div>
-    </div>
-
-    <div class="card">
-      <div class="table-wrap">
-        <table class="indexkb-table">
-          <tbody>
-            {% for row in grid %}
-              <tr>
-                {% for c in row %}
-                  <td
-                    class="{{ c.css_class }}"
-                    {% if c.rowspan and c.rowspan > 1 %}rowspan="{{ c.rowspan }}"{% endif %}
-                    {% if c.colspan and c.colspan > 1 %}colspan="{{ c.colspan }}"{% endif %}
-                  >
-                    {{ c.value }}
-                  </td>
-                {% endfor %}
-              </tr>
-            {% endfor %}
-          </tbody>
-        </table>
-      </div>
-      <div class="hint" style="margin-top:10px">
-        Подсветка: <span class="indexkb-legend indexkb-ok">загружено</span>,
-        <span class="indexkb-legend indexkb-warn">частично</span>,
-        <span class="indexkb-legend indexkb-bad">не загружено</span>.
       </div>
     </div>
   {% endif %}

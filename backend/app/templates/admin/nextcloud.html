@@ -72,6 +72,9 @@
       <form method="post" action="/admin/integrations/nextcloud/sync" style="display:inline" data-action-label="Синхронизация" onsubmit="return confirm('Запустить синхронизацию?')">
         <button class="btn" type="submit" data-loading-text="Синхронизирую…">Синхронизировать сейчас</button>
       </form>
+      <form method="post" action="/admin/integrations/nextcloud/sync-v2" style="display:inline" data-action-label="Синхронизация (03 Артефакты)" onsubmit="return confirm('Запустить синхронизацию (03 Артефакты)?')">
+        <button class="btn btn-accent" type="submit" data-loading-text="Синхронизирую…">Синхронизация (03 Артефакты)</button>
+      </form>
     </div>
     {% if discovered_orgs %}
       <div style="margin-top:12px">
