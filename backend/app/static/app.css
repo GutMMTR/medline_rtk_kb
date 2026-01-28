@@ -32,6 +32,8 @@ textarea { width: 100%; padding: 10px 12px; border:1px solid var(--border-2); bo
 button, .btn { display:inline-flex; align-items:center; justify-content:center; gap: 8px; padding: 9px 14px; border-radius: 12px; border:1px solid var(--rtk-purple); background: var(--rtk-purple); color:#fff; cursor:pointer; text-decoration:none; font-weight: 600; font-size: 14px; line-height: 1; }
 button:hover, .btn:hover { filter: brightness(.95); }
 button:disabled, .btn[aria-disabled="true"] { opacity: .65; cursor: not-allowed; filter: none; }
+/* allow disabling <a class="btn"> via aria-disabled */
+.btn[aria-disabled="true"] { pointer-events: none; }
 .inline-status { margin-top: 10px; padding: 10px 12px; border-radius: 12px; border: 1px solid var(--border); background: #fff; }
 .inline-status--loading { border-color: rgba(107,45,255,.35); background: rgba(107,45,255,.04); }
 .inline-status--error { border-color: #fda29b; background: #fee4e2; color: #b42318; }
@@ -81,12 +83,24 @@ th { color:#344054; font-size: 12px; text-transform: uppercase; letter-spacing: 
   .filter-form--status .filter-actions { grid-column: span 1; }
   .filter-form--status > .filter-actions { justify-self: end; }
 
+  /* Auditor artifacts: single status select -> avoid empty right half */
+  .filter-form--auditor-artifacts .filter-status { grid-column: span 2; }
+  .filter-form--auditor-artifacts .filter-short { grid-column: span 3; }
+  .filter-form--auditor-artifacts .filter-actions { grid-column: span 1; }
+
   /* Pages WITHOUT status filter (artifact directory) */
   .filter-form--nostatus .filter-short { grid-column: span 5; }
   .filter-form--nostatus .filter-actions { grid-column: span 1; }
 }
 .table-wrap { overflow: auto; }
 .table td:last-child, .table th:last-child { white-space: nowrap; }
+.table-fixed { table-layout: fixed; }
+.table-fixed th, .table-fixed td { overflow-wrap: anywhere; word-break: break-word; }
+.cell-wrap { white-space: normal; }
+/* status columns may contain multi-line meta (e.g. audit date/actor) — allow wrapping */
+.table-fixed .col-status { white-space: normal; }
+.table-fixed .col-status .badge{ white-space: nowrap; }
+.table-fixed .td-actions, .table-fixed .td-actions-wide { white-space: nowrap; }
 .audit-id{ word-break: break-all; white-space: normal; }
 .audit-diff-table td, .audit-diff-table th{ vertical-align: top; }
 .audit-diff-added{ background: rgba(18,183,106,.10); }
@@ -98,6 +112,7 @@ th { color:#344054; font-size: 12px; text-transform: uppercase; letter-spacing: 
 .th-actions-wide { width: 96px; }
 .td-actions-wide { width: 96px; text-align: right; vertical-align: middle; }
 .td-actions-wide .row-right { justify-content:flex-end; }
+.td-actions-wide .row-right { align-items: center; gap: 8px; }
 .icon-btn { display:inline-flex; align-items:center; justify-content:center; width: 36px; height: 32px; border-radius: 8px; border: 1px solid #d0d5dd; background:#fff; color:#101828; text-decoration:none; }
 .icon-btn:hover { background:#f2f4f7; }
 .icon-danger { color: #b42318; border-color: #fda29b; }
@@ -109,10 +124,123 @@ th { color:#344054; font-size: 12px; text-transform: uppercase; letter-spacing: 
 /* Optional: keep for other icon images (if any), but SVG is preferred for consistent styling */
 .icon-btn .icon-img { width: 18px; height: 18px; display:block; }
 
-.upload-row { display:flex; align-items:center; gap: 10px; }
-.file-input { width: 260px; }
+.upload-row { display:flex; align-items:center; gap: 10px; min-width: 0; flex-wrap: wrap; }
+.file-input { width: 260px; max-width: 100%; min-width: 0; }
 .table .upload-row { justify-content: flex-start; gap: 8px; }
-.table .file-input { width: 200px; max-width: 100%; }
+.table .file-input { width: 100%; flex: 1 1 240px; }
+
+/* Customer upload: keep on one line, submit as icon */
+.table-customer-artifacts .upload-row,
+.table-customer-files .upload-row{ flex-wrap: nowrap; }
+.table-customer-artifacts .upload-row .icon-btn,
+.table-customer-files .upload-row .icon-btn{ flex: 0 0 auto; }
+.table-customer-artifacts .file-input,
+.table-customer-files .file-input{ flex: 1 1 auto; min-width: 0; }
+.table-customer-artifacts .file-input,
+.table-customer-files .file-input{ color: transparent; }
+.table-customer-artifacts .file-input:focus,
+.table-customer-files .file-input:focus{ outline: 2px solid rgba(107,45,255,.25); outline-offset: 2px; }
+.table-customer-artifacts .file-input::file-selector-button,
+.table-customer-files .file-input::file-selector-button{ color: var(--rtk-purple); }
+.table-customer-artifacts .file-name,
+.table-customer-files .file-name{ margin-top: 4px; font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
+
+/* Make native file input look like a real control and not force horizontal scroll */
+.file-input{ height: 32px; padding: 4px 8px; border-radius: 10px; }
+.file-input::file-selector-button{
+  height: 26px;
+  margin-right: 10px;
+  border: 1px solid rgba(107,45,255,.35);
+  background: rgba(107,45,255,.06);
+  color: var(--rtk-purple);
+  border-radius: 10px;
+  padding: 0 10px;
+  cursor: pointer;
+  font-weight: 700;
+}
+.file-input::file-selector-button:hover{ background: rgba(107,45,255,.10); }
+
+/* Customer tables: keep narrow columns narrow */
+.table-customer-artifacts th:nth-child(4),
+.table-customer-artifacts td:nth-child(4){ width: 120px; }
+.table-customer-artifacts th:nth-child(5),
+.table-customer-artifacts td:nth-child(5){ width: 70px; }
+.table-customer-artifacts th:nth-child(6),
+.table-customer-artifacts td:nth-child(6){ width: 70px; }
+.table-customer-artifacts th:nth-child(10),
+.table-customer-artifacts td:nth-child(10){ width: 200px; }
+.table-customer-artifacts th:nth-child(11),
+.table-customer-artifacts td:nth-child(11){ width: 260px; }
+
+/* Make upload controls compact inside customer tables */
+.table-customer-artifacts .upload-row,
+.table-customer-files .upload-row{ gap: 8px; }
+.table-customer-artifacts .file-input,
+.table-customer-files .file-input{ flex: 1 1 160px; min-width: 140px; width: 100%; }
+.table-customer-artifacts .upload-row .btn,
+.table-customer-files .upload-row .btn{ flex: 0 0 auto; }
+
+/* Responsive: reduce columns to avoid horizontal scroll */
+@media (max-width: 1500px){
+  /* customer artifacts: hide topic + domain */
+  .table-customer-artifacts th:nth-child(1),
+  .table-customer-artifacts td:nth-child(1),
+  .table-customer-artifacts th:nth-child(2),
+  .table-customer-artifacts td:nth-child(2){ display:none; }
+  /* reclaim space for long text columns */
+  .table-customer-artifacts th:nth-child(10),
+  .table-customer-artifacts td:nth-child(10){ width: 180px; }
+  .table-customer-artifacts th:nth-child(11),
+  .table-customer-artifacts td:nth-child(11){ width: 240px; }
+}
+@media (max-width: 1280px){
+  /* customer artifacts: hide indicator */
+  .table-customer-artifacts th:nth-child(3),
+  .table-customer-artifacts td:nth-child(3){ display:none; }
+  /* stack upload controls */
+  .table-customer-artifacts .upload-row .btn{ width: 100%; }
+  .table-customer-artifacts .file-input{ min-width: 0; flex-basis: 100%; }
+}
+
+.table-customer-files th:nth-child(1),
+.table-customer-files td:nth-child(1){ width: 140px; }
+.table-customer-files th:nth-child(2),
+.table-customer-files td:nth-child(2){ width: 70px; }
+.table-customer-files th:nth-child(4),
+.table-customer-files td:nth-child(4){ width: 140px; }
+.table-customer-files th:nth-child(5),
+.table-customer-files td:nth-child(5){ width: 140px; }
+.table-customer-files th:nth-child(6),
+.table-customer-files td:nth-child(6){ width: 260px; }
+.table-customer-files th:nth-child(7),
+.table-customer-files td:nth-child(7),
+.table-customer-files th:nth-child(8),
+.table-customer-files td:nth-child(8),
+.table-customer-files th:nth-child(9),
+.table-customer-files td:nth-child(9),
+.table-customer-files th:nth-child(10),
+.table-customer-files td:nth-child(10){ width: 150px; }
+.table-customer-files th:nth-child(11),
+.table-customer-files td:nth-child(11){ width: 300px; }
+
+@media (max-width: 1500px){
+  /* customer files: hide updated meta */
+  .table-customer-files th:nth-child(9),
+  .table-customer-files td:nth-child(9),
+  .table-customer-files th:nth-child(10),
+  .table-customer-files td:nth-child(10){ display:none; }
+  .table-customer-files th:nth-child(11),
+  .table-customer-files td:nth-child(11){ width: 260px; }
+}
+@media (max-width: 1280px){
+  /* customer files: hide upload meta (who/when) */
+  .table-customer-files th:nth-child(7),
+  .table-customer-files td:nth-child(7),
+  .table-customer-files th:nth-child(8),
+  .table-customer-files td:nth-child(8){ display:none; }
+  .table-customer-files .upload-row .btn{ width: 100%; }
+  .table-customer-files .file-input{ min-width: 0; flex-basis: 100%; }
+}
 .table .badge { min-width: 0; }
 .table .btn, .table .btn-secondary { height: 32px; padding: 0 12px; line-height: 30px; }
 .table .icon-btn { height: 32px; width: 36px; }
@@ -167,6 +295,11 @@ th { color:#344054; font-size: 12px; text-transform: uppercase; letter-spacing: 
 .combo { position: relative; }
 .combo-input-wrap{ position: relative; }
 .combo-input{ padding-right: 34px; }
+.org-picker--error .combo-input,
+.org-picker--error select{
+  border-color: #fda29b;
+  box-shadow: 0 0 0 3px rgba(240,68,56,.15);
+}
 .combo-caret{ color: var(--muted); }
 .combo-input-wrap .combo-caret{
   position:absolute;
@@ -270,6 +403,8 @@ th { color:#344054; font-size: 12px; text-transform: uppercase; letter-spacing: 
 .kb-form{ display:flex; align-items:center; justify-content:center; gap: 8px; }
 .kb-input{ width: 92px; text-align:center; padding: 8px 10px; border-radius: 10px; }
 .kb-group-row td{ background: #F2F4F7; border-bottom-color: var(--border); }
+.kb-short-link{ color: var(--rtk-purple); text-decoration: underline; font-weight: 700; cursor: pointer; }
+.kb-short-link:hover{ filter: brightness(.95); }
 
 /* Index KB */
 .indexkb-admin-grid{ grid-template-columns: repeat(2, minmax(0, 1fr)); }

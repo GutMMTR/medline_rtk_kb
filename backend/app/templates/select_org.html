@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+{% block content %}
+  <div class="section-header">
+    <div>
+      <h2 style="margin:0">{{ title or "Выбор организации" }}</h2>
+      <div class="muted">{{ subtitle or "Выберите организацию, чтобы продолжить." }}</div>
+    </div>
+  </div>
+
+  <div class="card">
+    <form method="get" action="{{ action_path }}">
+      <label>Организация</label>
+      <select name="org_id" data-org-autocomplete="1" data-auto-submit="1" data-placeholder="Поиск организации…">
+        <option value="" selected>— выберите —</option>
+        {% for o in orgs %}
+          <option value="{{ o.id }}">{{ o.name }}</option>
+        {% endfor %}
+      </select>
+      <noscript>
+        <div style="margin-top:12px">
+          <button class="btn" type="submit">Открыть</button>
+        </div>
+      </noscript>
+    </form>
+  </div>
+{% endblock %}
+

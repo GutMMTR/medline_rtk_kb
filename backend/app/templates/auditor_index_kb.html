@@ -6,16 +6,22 @@
       <div class="muted">Копия эталонного Excel-отчёта. В ячейках с сокращениями показываем статус по организации.</div>
     </div>
     <div class="row-right">
-      <form method="get" action="/auditor/index-kb" class="header-inline-form">
-        <label style="margin:0">Организация</label>
-        <select name="org_id" onchange="this.form.submit()" data-org-autocomplete="1" data-auto-submit="1" data-placeholder="Поиск организации…">
-          {% for o in orgs %}
-            <option value="{{ o.id }}" {% if o.id == selected_org_id %}selected{% endif %}>{{ o.name }}</option>
-          {% endfor %}
-        </select>
-      </form>
-      <a class="btn btn-secondary" href="/auditor/artifacts?org_id={{ selected_org_id }}">Артефакты</a>
-      <a class="btn btn-secondary" href="/auditor/files?org_id={{ selected_org_id }}">Файлы</a>
+      {% set _base = base_prefix or "/auditor" %}
+      {% set _files = files_base or (_base ~ "/files") %}
+      {% set _art = artifacts_base or (_base ~ "/artifacts") %}
+      {% if show_org_selector is not defined or show_org_selector %}
+        <form method="get" action="{{ _base }}/index-kb" class="header-inline-form {% if org_picker_error %}org-picker--error{% endif %}">
+          <label style="margin:0">Организация</label>
+          <select name="org_id" onchange="this.form.submit()" data-org-autocomplete="1" data-auto-submit="1" data-placeholder="Поиск организации…">
+            <option value="" {% if not selected_org_id %}selected{% endif %}></option>
+            {% for o in orgs %}
+              <option value="{{ o.id }}" {% if o.id == selected_org_id %}selected{% endif %}>{{ o.name }}</option>
+            {% endfor %}
+          </select>
+        </form>
+      {% endif %}
+      <a class="btn btn-secondary" href="{% if selected_org_id %}{{ _art }}?org_id={{ selected_org_id }}{% else %}{{ _art }}{% endif %}">Артефакты</a>
+      <a class="btn btn-secondary" href="{% if selected_org_id %}{{ _files }}?org_id={{ selected_org_id }}{% else %}{{ _files }}{% endif %}">Файлы</a>
       <a class="btn btn-secondary" href="/artifacts">Справочник</a>
     </div>
   </div>
@@ -35,16 +41,30 @@
       </div>
 
       <div class="admin-grid indexkb-admin-grid">
-        <a class="admin-tile" href="/auditor/index-kb/uib?org_id={{ selected_org_id }}">
-          <div class="admin-tile-icon">
-            <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" focusable="false">
-              <path fill="currentColor" d="M7 2h10v2H7V2zm-2 4h14v16H5V6zm3 3h8v2H8V9zm0 4h8v2H8v-2zm0 4h6v2H8v-2z"/>
-            </svg>
+        {% if selected_org_id %}
+          <a class="admin-tile" href="{{ _base }}/index-kb/uib?org_id={{ selected_org_id }}">
+            <div class="admin-tile-icon">
+              <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" focusable="false">
+                <path fill="currentColor" d="M7 2h10v2H7V2zm-2 4h14v16H5V6zm3 3h8v2H8V9zm0 4h8v2H8v-2zm0 4h6v2H8v-2z"/>
+              </svg>
+            </div>
+            <div>
+              <div class="admin-tile-title">Управление ИБ</div>
+            </div>
+          </a>
+        {% else %}
+          <div class="admin-tile admin-tile--disabled" aria-disabled="true" title="Выберите организацию">
+            <div class="admin-tile-icon">
+              <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" focusable="false">
+                <path fill="currentColor" d="M7 2h10v2H7V2zm-2 4h14v16H5V6zm3 3h8v2H8V9zm0 4h8v2H8v-2zm0 4h6v2H8v-2z"/>
+              </svg>
+            </div>
+            <div>
+              <div class="admin-tile-title">Управление ИБ</div>
+              <div class="admin-tile-desc">Выберите организацию</div>
+            </div>
           </div>
-          <div>
-            <div class="admin-tile-title">Управление ИБ</div>
-          </div>
-        </a>
+        {% endif %}
 
         {% for s in sheet_names %}
           {% if s != "Управление ИБ" %}

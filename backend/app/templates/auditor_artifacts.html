@@ -8,7 +8,7 @@
       </div>
     </div>
     <div class="row-right">
-      <form method="get" action="/auditor/artifacts" class="header-inline-form">
+      <form method="get" action="/auditor/artifacts" class="header-inline-form org-picker {% if org_required %}org-picker--error{% endif %}">
         <input type="hidden" name="topic" value="{{ topic or '' }}" />
         <input type="hidden" name="domain" value="{{ domain or '' }}" />
         <input type="hidden" name="kb_level" value="{{ kb_level or '' }}" />
@@ -18,20 +18,21 @@
         <input type="hidden" name="page_size" value="{{ page_size }}" />
         <label style="margin:0">Организация</label>
         <select name="org_id" onchange="this.form.submit()" data-org-autocomplete="1" data-auto-submit="1" data-placeholder="Поиск организации…">
+          <option value="" {% if not selected_org_id %}selected{% endif %}></option>
           {% for o in orgs %}
             <option value="{{ o.id }}" {% if o.id == selected_org_id %}selected{% endif %}>{{ o.name }}</option>
           {% endfor %}
         </select>
       </form>
-      <a class="btn btn-secondary" href="/auditor/artifacts/export.xlsx?{{ export_query }}">Выгрузить Excel</a>
-      <a class="btn btn-secondary" href="/auditor/index-kb?org_id={{ selected_org_id }}">Индекс КБ</a>
-      <a class="btn btn-secondary" href="/auditor/files?org_id={{ selected_org_id }}">Файлы</a>
+      <a class="btn btn-secondary" {% if selected_org_id %}href="/auditor/artifacts/export.xlsx?{{ export_query }}"{% else %}aria-disabled="true"{% endif %}>Выгрузить Excel</a>
+      <a class="btn btn-secondary" {% if selected_org_id %}href="/auditor/index-kb?org_id={{ selected_org_id }}"{% else %}aria-disabled="true"{% endif %}>Индекс КБ</a>
+      <a class="btn btn-secondary" {% if selected_org_id %}href="/auditor/files?org_id={{ selected_org_id }}"{% else %}aria-disabled="true"{% endif %}>Файлы</a>
       <a class="btn btn-secondary" href="/artifacts">Справочник</a>
     </div>
   </div>
 
   <div class="card">
-    <form method="get" action="/auditor/artifacts" class="grid filter-form filter-form--status">
+    <form method="get" action="/auditor/artifacts" class="grid filter-form filter-form--status filter-form--auditor-artifacts">
       <input type="hidden" name="org_id" value="{{ selected_org_id }}" />
       <input type="hidden" name="page_size" value="{{ page_size }}" />
       <div class="filter-q">
@@ -85,15 +86,16 @@
     </form>
   </div>
 
-  <div class="card">
-    <div class="section-header">
-      <h3>Таблица</h3>
-      <div class="muted">Показано {{ rows|length }} из {{ total }} · страница {{ page }} из {{ total_pages }}</div>
-      <div class="row-right"></div>
-    </div>
+  {% if selected_org_id %}
+    <div class="card">
+      <div class="section-header">
+        <h3>Таблица</h3>
+        <div class="muted">Показано {{ rows|length }} из {{ total }} · страница {{ page }} из {{ total_pages }}</div>
+        <div class="row-right"></div>
+      </div>
 
-    <div class="table-wrap">
-      <table class="table">
+      <div class="table-wrap">
+        <table class="table">
         <thead>
           <tr>
             <th>Тематика</th>
@@ -214,11 +216,11 @@
             <tr><td colspan="13" class="muted">Нет данных.</td></tr>
           {% endif %}
         </tbody>
-      </table>
-    </div>
+        </table>
+      </div>
 
-    {% if total_pages > 1 %}
-      <div class="pagination">
+      {% if total_pages > 1 %}
+        <div class="pagination">
         <div class="muted">Страница {{ page }} из {{ total_pages }}</div>
         <div class="pagination-links">
           {% if has_prev %}
@@ -264,8 +266,13 @@
           <input name="page" type="number" min="1" max="{{ total_pages }}" value="{{ page }}" style="width: 110px" />
           <button class="btn btn-secondary" type="submit">Ок</button>
         </form>
-      </div>
-    {% endif %}
-  </div>
+        </div>
+      {% endif %}
+    </div>
+  {% else %}
+    <div class="card">
+      <div class="muted">Таблица появится после выбора организации.</div>
+    </div>
+  {% endif %}
 {% endblock %}
 

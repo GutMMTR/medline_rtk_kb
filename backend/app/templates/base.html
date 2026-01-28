@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>{{ title or "Медлайн.РТК.КБ" }}</title>
-    <link rel="stylesheet" href="/static/app.css?v=23" />
+    <link rel="stylesheet" href="/static/app.css?v=29" />
     <link rel="icon" href="/static/brand/rtk_mark.svg" type="image/svg+xml" />
   </head>
   <body>
@@ -186,6 +186,27 @@
 
         document.querySelectorAll("select[data-org-autocomplete='1']").forEach(function (sel) {
           initSelectAutocomplete(sel);
+        });
+      })();
+    </script>
+    <script>
+      (function () {
+        // Progressive enhancement: show selected file name under the file input (customer tables),
+        // while keeping the input itself compact.
+        function updateFileName(inputEl) {
+          try {
+            var form = inputEl.closest("form");
+            if (!form) return;
+            var out = form.querySelector(".file-name");
+            if (!out) return;
+            var f = (inputEl.files && inputEl.files.length) ? inputEl.files[0] : null;
+            out.textContent = f ? ("Файл: " + f.name) : "";
+          } catch (e) {}
+        }
+
+        document.querySelectorAll("input.file-input[type='file']").forEach(function (inp) {
+          inp.addEventListener("change", function () { updateFileName(inp); });
+          updateFileName(inp);
         });
       })();
     </script>

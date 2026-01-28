@@ -6,26 +6,46 @@
       <div class="muted">Упрощённая форма: КБ1/КБ2/КБ3 заполняются одинаково по статусу артефакта (5/0). Если сокращение не найдено — ввод вручную.</div>
     </div>
     <div class="row-right">
-      <form method="get" action="/auditor/index-kb/uib" class="header-inline-form">
-        <label style="margin:0">Организация</label>
-        <select name="org_id" onchange="this.form.submit()" data-org-autocomplete="1" data-auto-submit="1" data-placeholder="Поиск организации…">
-          {% for o in orgs %}
-            <option value="{{ o.id }}" {% if o.id == selected_org_id %}selected{% endif %}>{{ o.name }}</option>
-          {% endfor %}
-        </select>
-      </form>
-      <a class="btn btn-secondary" href="/auditor/index-kb?org_id={{ selected_org_id }}&sheet={{ sheet_name }}">Оригинал Excel</a>
-      <a class="btn btn-secondary" href="/auditor/artifacts?org_id={{ selected_org_id }}">Артефакты</a>
-      <a class="btn btn-secondary" href="/auditor/files?org_id={{ selected_org_id }}">Файлы</a>
+      {% set _base = base_prefix or "/auditor" %}
+      {% set _files = files_base or (_base ~ "/files") %}
+      {% set _art = artifacts_base or (_base ~ "/artifacts") %}
+      {% if show_org_selector is not defined or show_org_selector %}
+        <form method="get" action="{{ _base }}/index-kb/uib" class="header-inline-form {% if org_picker_error %}org-picker--error{% endif %}">
+          <label style="margin:0">Организация</label>
+          <select name="org_id" onchange="this.form.submit()" data-org-autocomplete="1" data-auto-submit="1" data-placeholder="Поиск организации…">
+            <option value="" {% if not selected_org_id %}selected{% endif %}></option>
+            {% for o in orgs %}
+              <option value="{{ o.id }}" {% if o.id == selected_org_id %}selected{% endif %}>{{ o.name }}</option>
+            {% endfor %}
+          </select>
+        </form>
+      {% endif %}
+      {% if selected_org_id %}
+        <a class="btn btn-secondary" href="{{ _base }}/index-kb/uib/export.xlsx?org_id={{ selected_org_id }}">Выгрузить Excel</a>
+        <a class="btn btn-secondary" href="{{ _base }}/index-kb?org_id={{ selected_org_id }}&sheet={{ sheet_name }}" title="Вернуться к основной странице Индекса КБ (Excel-вид)">Индекс КБ</a>
+        <a class="btn btn-secondary" href="{{ _art }}?org_id={{ selected_org_id }}">Артефакты</a>
+        <a class="btn btn-secondary" href="{{ _files }}?org_id={{ selected_org_id }}">Файлы</a>
+      {% else %}
+        <a class="btn btn-secondary" href="#" onclick="return false" style="pointer-events:none;opacity:.55" title="Выберите организацию">Выгрузить Excel</a>
+        <a class="btn btn-secondary" href="#" onclick="return false" style="pointer-events:none;opacity:.55" title="Выберите организацию">Индекс КБ</a>
+        <a class="btn btn-secondary" href="{{ _art }}">Артефакты</a>
+        <a class="btn btn-secondary" href="{{ _files }}">Файлы</a>
+      {% endif %}
     </div>
   </div>
+
+  {% if not selected_org_id %}
+    <div class="card">
+      <div class="muted">Выберите организацию вверху — после этого появятся таблицы и выгрузка в Excel.</div>
+    </div>
+  {% endif %}
 
   {% if error %}
     <div class="card">
       <div class="error">{{ error }}</div>
       <div class="hint">Ожидаем файл по пути: <span class="mono">{{ template_path }}</span> (монтируется из <span class="mono">docs/</span>).</div>
     </div>
-  {% else %}
+  {% elif selected_org_id %}
     <div class="card">
       <div class="section-header" style="margin-bottom:10px">
         <h3 style="margin:0">Итоговая таблица</h3>
@@ -48,7 +68,15 @@
             {% for s in summary_rows %}
               <tr>
                 <td><b>{{ s.title }}</b></td>
-                <td class="mono">{{ s.short_name }}</td>
+                <td class="mono">
+                  {% if s.short_name %}
+                    <a href="{{ _files }}?org_id={{ selected_org_id }}&path={{ s.short_name|replace('.', '/')|urlencode }}" class="kb-short-link">
+                      {{ s.short_name }}
+                    </a>
+                  {% else %}
+                    —
+                  {% endif %}
+                </td>
                 <td class="kb-cell kb-kb3">{% if s.kb3 is not none %}{{ "%.2f"|format(s.kb3) }}{% else %}—{% endif %}</td>
                 <td class="kb-cell kb-kb2">{% if s.kb2 is not none %}{{ "%.2f"|format(s.kb2) }}{% else %}—{% endif %}</td>
                 <td class="kb-cell kb-kb1">{% if s.kb1 is not none %}{{ "%.2f"|format(s.kb1) }}{% else %}—{% endif %}</td>
@@ -86,7 +114,15 @@
               {% else %}
                 <tr>
                   <td>{{ r.row.title }}</td>
-                  <td class="mono">{{ r.row.short_name }}</td>
+                  <td class="mono">
+                    {% if r.row.short_name %}
+                      <a href="{{ _files }}?org_id={{ selected_org_id }}&path={{ r.row.short_name|replace('.', '/')|urlencode }}" class="kb-short-link">
+                        {{ r.row.short_name }}
+                      </a>
+                    {% else %}
+                      —
+                    {% endif %}
+                  </td>
 
                   {% if r.is_auto %}
                     <td class="kb-cell kb-kb3"><span class="kb-val">{{ r.value|int }}</span></td>
@@ -97,21 +133,25 @@
                     </td>
                   {% else %}
                     <td class="kb-cell kb-kb3">
-                      <form method="post" action="/auditor/index-kb/uib/manual" class="kb-form">
-                        <input type="hidden" name="org_id" value="{{ selected_org_id }}" />
-                        <input type="hidden" name="row_key" value="{{ r.row.row_key }}" />
-                        <input class="kb-input" name="value" type="number" min="0" max="5" step="0.1" value="{% if r.value is not none %}{{ r.value }}{% endif %}" placeholder="—" />
-                        <button class="icon-btn" type="submit" title="Сохранить" aria-label="Сохранить">
-                          <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" focusable="false">
-                            <path fill="currentColor" d="M17 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V7l-4-4zM6 8V5h9v3H6z"/>
-                            <path fill="currentColor" d="M16 9v6h2l-3 3-3-3h2V9h2z"/>
-                          </svg>
-                        </button>
-                      </form>
-                      {% if r.source == "manual" %}
-                        <div class="muted" style="margin-top:4px; font-size:12px">
-                          {{ r.updated_by }} · {{ r.updated_at|dt }}
-                        </div>
+                      {% if readonly %}
+                        <span class="kb-val">{% if r.value is not none %}{{ r.value }}{% else %}—{% endif %}</span>
+                      {% else %}
+                        <form method="post" action="{{ _base }}/index-kb/uib/manual" class="kb-form">
+                          <input type="hidden" name="org_id" value="{{ selected_org_id }}" />
+                          <input type="hidden" name="row_key" value="{{ r.row.row_key }}" />
+                          <input class="kb-input" name="value" type="number" min="0" max="5" step="0.1" value="{% if r.value is not none %}{{ r.value }}{% endif %}" placeholder="—" />
+                          <button class="icon-btn" type="submit" title="Сохранить" aria-label="Сохранить">
+                            <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" focusable="false">
+                              <path fill="currentColor" d="M17 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V7l-4-4zM6 8V5h9v3H6z"/>
+                              <path fill="currentColor" d="M16 9v6h2l-3 3-3-3h2V9h2z"/>
+                            </svg>
+                          </button>
+                        </form>
+                        {% if r.source == "manual" %}
+                          <div class="muted" style="margin-top:4px; font-size:12px">
+                            {{ r.updated_by }} · {{ r.updated_at|dt }}
+                          </div>
+                        {% endif %}
                       {% endif %}
                     </td>
                     <td class="kb-cell kb-kb2"><span class="kb-val">{% if r.value is not none %}{{ r.value }}{% else %}—{% endif %}</span></td>

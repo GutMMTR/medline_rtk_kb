@@ -15,6 +15,8 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, Uplo
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from fastapi.templating import Jinja2Templates
 from openpyxl import Workbook
+from openpyxl.styles import Alignment, Font, PatternFill
+from openpyxl.utils import get_column_letter
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy import and_, func, insert, select
 from sqlalchemy.orm import Session, aliased
@@ -55,6 +57,12 @@ from app.integrations.nextcloud_sync import sync_from_nextcloud
 
 router = APIRouter()
 templates = Jinja2Templates(directory="app/templates")
+
+DEFAULT_ORG_NAME = "Default"
+
+
+def _filter_out_default_orgs(orgs: list[Organization]) -> list[Organization]:
+    return [o for o in (orgs or []) if (o.name or "").strip() != DEFAULT_ORG_NAME]
 
 
 def _fmt_dt(value: object) -> str:
@@ -186,19 +194,26 @@ def index(
             {"request": request, "user": user, "message": "Нет доступных организаций. Обратитесь к администратору."},
         )
 
-    selected_org_id = org_id or orgs[0].id
+    # Для аудитора/админа не подставляем организацию автоматически — сначала выбор организации.
+    # (Иначе первая страница аудитора сразу открывает таблицу по "первой" организации.)
+    if is_global_auditor:
+        return _redirect("/auditor/artifacts")
+
+    # Do not auto-select the system organization
+    visible_orgs = _filter_out_default_orgs(orgs)
+    selected_org_id = org_id or (visible_orgs[0].id if visible_orgs else orgs[0].id)
     role = get_user_role_for_org(db, user, selected_org_id)
     if not role:
-        selected_org_id = orgs[0].id
+        selected_org_id = (visible_orgs[0].id if visible_orgs else orgs[0].id)
         role = get_user_role_for_org(db, user, selected_org_id)
 
     # Customer UI: по умолчанию ведём пользователя в таблицу артефактов по организации.
     if role == Role.customer:
         return _redirect(f"/my/artifacts?org_id={selected_org_id}")
 
-    # Auditor UI: отдельный экран (выбор организации + таблица артефактов, только чтение + комментарии).
+    # Auditor UI: отдельный экран (сначала выбор организации).
     if role == Role.auditor and not user.is_admin:
-        return _redirect(f"/auditor/artifacts?org_id={selected_org_id}")
+        return _redirect("/auditor/artifacts")
 
     files = db.query(StoredFile).filter(StoredFile.org_id == selected_org_id).order_by(StoredFile.created_at.desc()).all()
     return templates.TemplateResponse(
@@ -273,6 +288,7 @@ def my_artifacts_page(
         .order_by(Organization.name.asc())
         .all()
     )
+    orgs = _filter_out_default_orgs(orgs)
     if not orgs:
         raise HTTPException(status_code=403, detail="Страница доступна только роли customer")
 
@@ -506,13 +522,14 @@ def my_artifacts_page(
 
 
 def _get_customer_orgs(db: Session, user: User) -> list[Organization]:
-    return (
+    orgs = (
         db.query(Organization)
         .join(UserOrgMembership, UserOrgMembership.org_id == Organization.id)
         .filter(UserOrgMembership.user_id == user.id, UserOrgMembership.role == Role.customer)
         .order_by(Organization.name.asc())
         .all()
     )
+    return _filter_out_default_orgs(orgs)
 
 
 def _get_customer_selected_org(db: Session, user: User, org_id: int | None) -> tuple[list[Organization], Organization]:
@@ -661,9 +678,169 @@ def my_files_explorer(
     return resp
 
 
+@router.get("/my/index-kb", response_class=HTMLResponse)
+def my_index_kb_page(
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+    org_id: int | None = None,
+    sheet: str | None = None,
+    q: str | None = None,
+) -> HTMLResponse:
+    orgs, org = _get_customer_selected_org(db, user, org_id)
+    # If customer has multiple orgs and didn't choose — force explicit choice (no auto)
+    if len(orgs) > 1 and not org_id:
+        resp = templates.TemplateResponse(
+            "select_org.html",
+            {
+                "request": request,
+                "user": user,
+                "container_class": "container-wide",
+                "title": "Индекс КБ",
+                "subtitle": "Выберите организацию, чтобы открыть Индекс КБ (только для ваших организаций).",
+                "action_path": "/my/index-kb",
+                "orgs": orgs,
+            },
+        )
+        resp.headers["Cache-Control"] = "no-store, max-age=0"
+        resp.headers["Pragma"] = "no-cache"
+        return resp
+
+    selected_org_id = org.id
+    template_path = settings.index_kb_template_path
+    if not template_path or not os.path.exists(template_path):
+        resp = templates.TemplateResponse(
+            "auditor_index_kb.html",
+            {
+                "request": request,
+                "user": user,
+                "container_class": "container-wide",
+                "orgs": orgs,
+                "selected_org_id": selected_org_id,
+                "template_path": template_path,
+                "sheet_names": [],
+                "error": "Не найден эталонный шаблон Индекс КБ (.xlsx).",
+                "base_prefix": "/my",
+                "files_base": "/my/files",
+                "artifacts_base": "/my/artifacts",
+                "show_org_selector": len(orgs) > 1,
+            },
+            status_code=200,
+        )
+        resp.headers["Cache-Control"] = "no-store, max-age=0"
+        resp.headers["Pragma"] = "no-cache"
+        return resp
+
+    tpl = get_index_kb_template(template_path)
+    sheet_names = tpl.sheet_names
+    resp = templates.TemplateResponse(
+        "auditor_index_kb.html",
+        {
+            "request": request,
+            "user": user,
+            "container_class": "container-wide",
+            "orgs": orgs,
+            "selected_org_id": selected_org_id,
+            "template_path": template_path,
+            "sheet_names": sheet_names,
+            "error": None,
+            "base_prefix": "/my",
+            "files_base": "/my/files",
+            "artifacts_base": "/my/artifacts",
+            "show_org_selector": len(orgs) > 1,
+        },
+    )
+    resp.headers["Cache-Control"] = "no-store, max-age=0"
+    resp.headers["Pragma"] = "no-cache"
+    return resp
+
+
+@router.get("/my/index-kb/uib", response_class=HTMLResponse)
+def my_index_kb_uib_page(
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+    org_id: int | None = None,
+) -> HTMLResponse:
+    orgs, org = _get_customer_selected_org(db, user, org_id)
+    if len(orgs) > 1 and not org_id:
+        resp = templates.TemplateResponse(
+            "select_org.html",
+            {
+                "request": request,
+                "user": user,
+                "container_class": "container-wide",
+                "title": "Управление ИБ (Индекс КБ)",
+                "subtitle": "Выберите организацию, чтобы открыть форму (только для ваших организаций).",
+                "action_path": "/my/index-kb/uib",
+                "orgs": orgs,
+            },
+        )
+        resp.headers["Cache-Control"] = "no-store, max-age=0"
+        resp.headers["Pragma"] = "no-cache"
+        return resp
+
+    selected_org_id = org.id
+    template_path = settings.index_kb_template_path
+    if not template_path or not os.path.exists(template_path):
+        resp = templates.TemplateResponse(
+            "auditor_index_kb_uib.html",
+            {
+                "request": request,
+                "user": user,
+                "container_class": "container-wide",
+                "orgs": orgs,
+                "selected_org_id": selected_org_id,
+                "template_path": template_path,
+                "error": "Не найден эталонный шаблон Индекс КБ (.xlsx).",
+                "rows": [],
+                "summary_rows": [],
+                "sheet_name": UIB_SHEET_NAME,
+                "org": org,
+                "base_prefix": "/my",
+                "files_base": "/my/files",
+                "artifacts_base": "/my/artifacts",
+                "show_org_selector": len(orgs) > 1,
+                "readonly": True,
+            },
+            status_code=200,
+        )
+        resp.headers["Cache-Control"] = "no-store, max-age=0"
+        resp.headers["Pragma"] = "no-cache"
+        return resp
+
+    org_obj, tpl, rows = build_uib_view(db, org_id=selected_org_id, template_path=template_path, actor=user)
+    from app.index_kb.uib_sheet import compute_uib_summary
+
+    summary_rows = compute_uib_summary(rows)
+    resp = templates.TemplateResponse(
+        "auditor_index_kb_uib.html",
+        {
+            "request": request,
+            "user": user,
+            "container_class": "container-wide",
+            "orgs": orgs,
+            "selected_org_id": selected_org_id,
+            "org": org_obj,
+            "sheet_name": UIB_SHEET_NAME,
+            "rows": rows,
+            "summary_rows": summary_rows,
+            "error": None,
+            "base_prefix": "/my",
+            "files_base": "/my/files",
+            "artifacts_base": "/my/artifacts",
+            "show_org_selector": len(orgs) > 1,
+            "readonly": True,
+        },
+    )
+    resp.headers["Cache-Control"] = "no-store, max-age=0"
+    resp.headers["Pragma"] = "no-cache"
+    return resp
+
+
 def _get_accessible_orgs_for_auditor(db: Session, user: User) -> list[Organization]:
     if user.is_admin:
-        return db.query(Organization).order_by(Organization.name.asc()).all()
+        return _filter_out_default_orgs(db.query(Organization).order_by(Organization.name.asc()).all())
     # По текущему MVP правилу auditor считается глобальным, если есть хотя бы один membership auditor.
     is_global_auditor = (
         db.query(UserOrgMembership)
@@ -672,9 +849,9 @@ def _get_accessible_orgs_for_auditor(db: Session, user: User) -> list[Organizati
         is not None
     )
     if is_global_auditor:
-        return db.query(Organization).order_by(Organization.name.asc()).all()
+        return _filter_out_default_orgs(db.query(Organization).order_by(Organization.name.asc()).all())
     # fallback: только свои (на случай, если правила изменятся)
-    return (
+    return _filter_out_default_orgs(
         db.query(Organization)
         .join(UserOrgMembership, UserOrgMembership.org_id == Organization.id)
         .filter(UserOrgMembership.user_id == user.id)
@@ -705,7 +882,50 @@ def auditor_artifacts_page(
             "empty.html",
             {"request": request, "user": user, "message": "Нет доступных организаций. Обратитесь к администратору."},
         )
-    selected_org_id = org_id or orgs[0].id
+    allowed_ids = {o.id for o in orgs}
+    if not org_id or org_id not in allowed_ids:
+        # Не показываем таблицу, пока организация не выбрана — но оставляем фильтры и селект.
+        # Это улучшает UX и избегает "автовыбора" организации.
+        resp = templates.TemplateResponse(
+            "auditor_artifacts.html",
+            {
+                "request": request,
+                "user": user,
+                "container_class": "container-wide",
+                "orgs": orgs,
+                "selected_org_id": None,
+                "org_required": True,
+                # filters (keep user input visible)
+                "topic": topic,
+                "domain": domain,
+                "kb_level": kb_level,
+                "short_name": short_name,
+                "q": q,
+                "status": status,
+                "topics": [],
+                "domains": [],
+                "kb_levels": [],
+                "page": 1,
+                "page_size": int(page_size or 50),
+                "rows": [],
+                "total": 0,
+                "total_pages": 1,
+                "has_prev": False,
+                "has_next": False,
+                "page_links": [1],
+                "base_query": "",
+                "export_query": "",
+                "completion_total": 0,
+                "completion_uploaded": 0,
+                "completion_pct": 0,
+                "current_url": request.url.path,
+                "can_delete_files": False,
+            },
+        )
+        resp.headers["Cache-Control"] = "no-store, max-age=0"
+        resp.headers["Pragma"] = "no-cache"
+        return resp
+    selected_org_id = org_id
     role = get_user_role_for_org(db, user, selected_org_id)
     if role not in (Role.auditor, Role.admin):
         raise HTTPException(status_code=403, detail="Требуются права auditor/admin")
@@ -1022,10 +1242,12 @@ def auditor_artifacts_export_xlsx(
     org_id: int = 0,
     topic: str | None = None,
     domain: str | None = None,
+    indicator: str | None = None,
     kb_level: str | None = None,
     short_name: str | None = None,
     q: str | None = None,
     status: str | None = None,
+    audit_status: str | None = None,
 ) -> Response:
     if not org_id:
         raise HTTPException(status_code=400, detail="org_id обязателен")
@@ -1039,6 +1261,8 @@ def auditor_artifacts_export_xlsx(
     CreatedBy = aliased(User)
     UpdatedBy = aliased(User)
     CommentBy = aliased(User)
+    AuditedBy = aliased(User)
+    AuditedFv = aliased(FileVersion)
 
     sub = (
         db.query(
@@ -1062,6 +1286,8 @@ def auditor_artifacts_export_xlsx(
             FileVersion,
             CreatedBy,
             UpdatedBy,
+            AuditedFv,
+            AuditedBy,
             latest_comment.c.comment_text,
             latest_comment.c.created_at,
             CommentBy,
@@ -1070,6 +1296,8 @@ def auditor_artifacts_export_xlsx(
         .outerjoin(FileVersion, FileVersion.id == OrgArtifact.current_file_version_id)
         .outerjoin(CreatedBy, CreatedBy.id == FileVersion.created_by_user_id)
         .outerjoin(UpdatedBy, UpdatedBy.id == OrgArtifact.updated_by_user_id)
+        .outerjoin(AuditedFv, AuditedFv.id == OrgArtifact.audited_file_version_id)
+        .outerjoin(AuditedBy, AuditedBy.id == OrgArtifact.audited_by_user_id)
         .outerjoin(latest_comment, latest_comment.c.org_artifact_id == OrgArtifact.id)
         .outerjoin(CommentBy, CommentBy.id == latest_comment.c.author_user_id)
         .filter(OrgArtifact.org_id == org_id)
@@ -1092,11 +1320,37 @@ def auditor_artifacts_export_xlsx(
             | (Artifact.achievement_item_text.ilike(like))
         )
 
-    status_filter = (status or "").strip().lower() or ""
-    if status_filter not in ("uploaded", "missing", ""):
-        status_filter = ""
-    if status_filter:
-        query = query.filter(OrgArtifact.status == OrgArtifactStatus(status_filter))
+    if indicator:
+        like_i = f"%{indicator.strip()}%"
+        query = query.filter(Artifact.indicator_name.ilike(like_i))
+
+    # Фильтр по статусу аудирования (как на /auditor/artifacts):
+    # missing / uploaded(==needs audit) / changed / audited
+    audit_filter = (audit_status or status or "").strip().lower() or ""
+    if audit_filter not in ("uploaded", "missing", "changed", "audited", ""):
+        audit_filter = ""
+    if audit_filter:
+        if audit_filter in ("missing", "uploaded"):
+            if audit_filter == "missing":
+                query = query.filter(OrgArtifact.status == OrgArtifactStatus.missing)
+            else:
+                query = query.filter(
+                    OrgArtifact.status == OrgArtifactStatus.uploaded,
+                    OrgArtifact.current_file_version_id.isnot(None),
+                    OrgArtifact.audited_file_version_id.is_(None),
+                )
+        elif audit_filter == "audited":
+            query = query.filter(
+                OrgArtifact.current_file_version_id.isnot(None),
+                OrgArtifact.audited_file_version_id.isnot(None),
+                OrgArtifact.audited_file_version_id == OrgArtifact.current_file_version_id,
+            )
+        elif audit_filter == "changed":
+            query = query.filter(
+                OrgArtifact.current_file_version_id.isnot(None),
+                OrgArtifact.audited_file_version_id.isnot(None),
+                OrgArtifact.audited_file_version_id != OrgArtifact.current_file_version_id,
+            )
 
     org = db.get(Organization, org_id)
     org_name = org.name if org else f"org_{org_id}"
@@ -1113,11 +1367,16 @@ def auditor_artifacts_export_xlsx(
         "КБ",
         "Артефакт",
         "Статус",
-        "Файл",
+        "Статус аудирования",
+        "Версия текущая",
+        "Файл текущий",
         "Дата загрузки",
         "Кто загрузил",
         "Дата изменения",
         "Кто изменил",
+        "Версия проаудированная",
+        "Проаудировано (когда)",
+        "Проаудировано (кто)",
         "Комментарий",
         "Комментарий (кто)",
         "Комментарий (когда)",
@@ -1128,7 +1387,22 @@ def auditor_artifacts_export_xlsx(
     def fmt_dt(dt: datetime | None) -> str:
         return dt.isoformat(sep=" ", timespec="seconds") if dt else ""
 
-    for (oa, a, fv, created_by, updated_by, c_text, c_at, c_by) in query.all():
+    def audit_status_label(oa: OrgArtifact) -> str:
+        if not oa.current_file_version_id:
+            return "Нет файла"
+        if oa.audited_file_version_id and oa.audited_file_version_id == oa.current_file_version_id:
+            return "Проаудировано"
+        if oa.audited_file_version_id:
+            return "Изменён"
+        return "Требует аудита"
+
+    def upload_status_label(oa: OrgArtifact) -> str:
+        # Используем понятные русские статусы, а не сырые enum-значения.
+        if oa.status == OrgArtifactStatus.uploaded:
+            return "Загружен"
+        return "Не загружен"
+
+    for (oa, a, fv, created_by, updated_by, aud_fv, aud_by, c_text, c_at, c_by) in query.all():
         ws.append(
             [
                 a.topic,
@@ -1138,17 +1412,26 @@ def auditor_artifacts_export_xlsx(
                 a.achievement_item_no or "",
                 a.kb_level,
                 a.title,
-                oa.status.value,
+                upload_status_label(oa),
+                audit_status_label(oa),
+                fv.version_no if fv else "",
                 fv.original_filename if fv else "",
                 fmt_dt(fv.created_at if fv else None),
                 created_by.login if created_by else "",
                 fmt_dt(oa.updated_at),
                 updated_by.login if updated_by else "",
+                aud_fv.version_no if aud_fv else "",
+                fmt_dt(oa.audited_at),
+                aud_by.login if aud_by else "",
                 (c_text or ""),
                 (c_by.login if c_by else ""),
                 fmt_dt(c_at),
             ]
         )
+
+    # Включаем Excel AutoFilter на шапке (выпадающие фильтры по колонкам)
+    last_col = ws.cell(row=1, column=len(headers)).column_letter
+    ws.auto_filter.ref = f"A1:{last_col}{ws.max_row}"
 
     # Простая автоподгонка ширин
     for idx, _ in enumerate(headers, start=1):
@@ -1316,6 +1599,10 @@ def _get_or_build_pdf_preview(db: Session, fv: FileVersion) -> tuple[bytes, str]
 
 
 def _require_auditor_or_admin_for_org(db: Session, user: User, org_id: int) -> None:
+    # Global admin (user.is_admin) must have access to all orgs regardless of per-org membership.
+    # Otherwise admin sees org list but gets 403 on open/export.
+    if getattr(user, "is_admin", False):
+        return
     role = get_user_role_for_org(db, user, org_id)
     if role not in (Role.auditor, Role.admin):
         raise HTTPException(status_code=403, detail="Требуются права auditor/admin")
@@ -1336,7 +1623,24 @@ def auditor_files_explorer(
             {"request": request, "user": user, "message": "Нет доступных организаций. Обратитесь к администратору."},
         )
 
-    selected_org_id = org_id or orgs[0].id
+    allowed_ids = {o.id for o in orgs}
+    if not org_id or org_id not in allowed_ids:
+        resp = templates.TemplateResponse(
+            "select_org.html",
+            {
+                "request": request,
+                "user": user,
+                "container_class": "container-wide",
+                "title": "Файлы аудитора",
+                "subtitle": "Выберите организацию, чтобы открыть файловый список.",
+                "action_path": "/auditor/files",
+                "orgs": orgs,
+            },
+        )
+        resp.headers["Cache-Control"] = "no-store, max-age=0"
+        resp.headers["Pragma"] = "no-cache"
+        return resp
+    selected_org_id = org_id
     _require_auditor_or_admin_for_org(db, user, selected_org_id)
     role = get_user_role_for_org(db, user, selected_org_id)
     can_delete_files = role == Role.admin
@@ -1424,16 +1728,22 @@ def auditor_index_kb_page(
     q: str | None = None,
 ) -> HTMLResponse:
     orgs_all = _get_accessible_orgs_for_auditor(db, user)
-    # Default — служебная организация, в UI Индекс КБ не показываем, если есть другие.
-    orgs = [o for o in orgs_all if o.name != "Default"] or orgs_all
+    orgs = orgs_all
     if not orgs:
         return templates.TemplateResponse(
             "empty.html",
             {"request": request, "user": user, "message": "Нет доступных организаций. Обратитесь к администратору."},
         )
 
-    selected_org_id = org_id or orgs[0].id
-    _require_auditor_or_admin_for_org(db, user, selected_org_id)
+    allowed_ids = {o.id for o in orgs}
+    selected_org_id: int | None = None
+    org_picker_error = False
+    if org_id and org_id in allowed_ids:
+        selected_org_id = org_id
+        _require_auditor_or_admin_for_org(db, user, selected_org_id)
+    else:
+        # No org selected (or invalid org_id) — show tiles, highlight picker.
+        org_picker_error = True
 
     template_path = settings.index_kb_template_path
     if not template_path or not os.path.exists(template_path):
@@ -1447,6 +1757,7 @@ def auditor_index_kb_page(
                 "selected_org_id": selected_org_id,
                 "template_path": template_path,
                 "error": "Не найден эталонный шаблон Индекс КБ (.xlsx).",
+                "org_picker_error": org_picker_error,
             },
             status_code=200,
         )
@@ -1468,6 +1779,11 @@ def auditor_index_kb_page(
             "sheet_names": sheet_names,
             "template_path": template_path,
             "error": None,
+            "base_prefix": "/auditor",
+            "files_base": "/auditor/files",
+            "artifacts_base": "/auditor/artifacts",
+            "show_org_selector": True,
+            "org_picker_error": org_picker_error,
         },
     )
     resp.headers["Cache-Control"] = "no-store, max-age=0"
@@ -1483,14 +1799,20 @@ def auditor_index_kb_uib_page(
     org_id: int | None = None,
 ) -> HTMLResponse:
     orgs_all = _get_accessible_orgs_for_auditor(db, user)
-    orgs = [o for o in orgs_all if o.name != "Default"] or orgs_all
+    orgs = orgs_all
     if not orgs:
         return templates.TemplateResponse(
             "empty.html",
             {"request": request, "user": user, "message": "Нет доступных организаций. Обратитесь к администратору."},
         )
-    selected_org_id = org_id or orgs[0].id
-    _require_auditor_or_admin_for_org(db, user, selected_org_id)
+    allowed_ids = {o.id for o in orgs}
+    selected_org_id: int | None = None
+    org_picker_error = False
+    if org_id and org_id in allowed_ids:
+        selected_org_id = org_id
+        _require_auditor_or_admin_for_org(db, user, selected_org_id)
+    else:
+        org_picker_error = True
 
     template_path = settings.index_kb_template_path
     if not template_path or not os.path.exists(template_path):
@@ -1505,6 +1827,15 @@ def auditor_index_kb_uib_page(
                 "template_path": template_path,
                 "error": "Не найден эталонный шаблон Индекс КБ (.xlsx).",
                 "rows": [],
+                "summary_rows": [],
+                "sheet_name": UIB_SHEET_NAME,
+                "org": None,
+                "base_prefix": "/auditor",
+                "files_base": "/auditor/files",
+                "artifacts_base": "/auditor/artifacts",
+                "show_org_selector": True,
+                "readonly": False,
+                "org_picker_error": org_picker_error,
             },
             status_code=200,
         )
@@ -1512,10 +1843,14 @@ def auditor_index_kb_uib_page(
         resp.headers["Pragma"] = "no-cache"
         return resp
 
-    org, tpl, rows = build_uib_view(db, org_id=selected_org_id, template_path=template_path, actor=user)
-    from app.index_kb.uib_sheet import compute_uib_summary
+    rows: list[object] = []
+    summary_rows: list[object] = []
+    org = None
+    if selected_org_id:
+        org, tpl, rows = build_uib_view(db, org_id=selected_org_id, template_path=template_path, actor=user)
+        from app.index_kb.uib_sheet import compute_uib_summary
 
-    summary_rows = compute_uib_summary(rows)
+        summary_rows = compute_uib_summary(rows)
     resp = templates.TemplateResponse(
         "auditor_index_kb_uib.html",
         {
@@ -1529,12 +1864,199 @@ def auditor_index_kb_uib_page(
             "rows": rows,
             "summary_rows": summary_rows,
             "error": None,
+            "base_prefix": "/auditor",
+            "files_base": "/auditor/files",
+            "artifacts_base": "/auditor/artifacts",
+            "show_org_selector": True,
+            "readonly": False,
+            "org_picker_error": org_picker_error,
         },
     )
     resp.headers["Cache-Control"] = "no-store, max-age=0"
     resp.headers["Pragma"] = "no-cache"
     return resp
 
+
+def _build_uib_export_xlsx(
+    *,
+    org_name: str,
+    sheet_title: str,
+    summary_rows: list[object],
+    rows: list[object],
+) -> bytes:
+    """
+    Export UIB view to a single-sheet XLSX:
+    - top: summary table
+    - below: main table (group rows + items)
+    """
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Управление ИБ"
+
+    bold = Font(bold=True)
+    title_font = Font(bold=True, size=14)
+    center = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    wrap = Alignment(vertical="top", wrap_text=True)
+    fill_hdr = PatternFill("solid", fgColor="F2F4F7")
+
+    def _set_row(values: list[object], *, bold_row: bool = False, fill: PatternFill | None = None) -> None:
+        ws.append(values)
+        r = ws.max_row
+        if bold_row or fill:
+            for c in range(1, len(values) + 1):
+                cell = ws.cell(row=r, column=c)
+                if bold_row:
+                    cell.font = bold
+                if fill:
+                    cell.fill = fill
+                cell.alignment = center if bold_row else wrap
+
+    # Title
+    _set_row([f"Индекс КБ · {sheet_title}", "", "", "", "", "", ""], bold_row=False)
+    ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=7)
+    ws["A1"].font = title_font
+    ws["A1"].alignment = Alignment(vertical="center")
+    _set_row([f"Организация: {org_name}", "", "", "", "", "", ""], bold_row=False)
+    ws.merge_cells(start_row=2, start_column=1, end_row=2, end_column=7)
+    ws["A2"].alignment = Alignment(vertical="center")
+    ws.append([])
+
+    # Summary table
+    _set_row(["Итоговая таблица"], bold_row=True, fill=fill_hdr)
+    ws.merge_cells(start_row=4, start_column=1, end_row=4, end_column=7)
+    ws["A4"].alignment = Alignment(horizontal="left", vertical="center")
+    _set_row(
+        [
+            "Категория",
+            "Сокращение",
+            "КБ3",
+            "КБ2",
+            "КБ1",
+            "Расчетный показатель 2025",
+            "Текущий показатель",
+        ],
+        bold_row=True,
+        fill=fill_hdr,
+    )
+    for s in summary_rows:
+        ws.append(
+            [
+                getattr(s, "title", ""),
+                getattr(s, "short_name", ""),
+                getattr(s, "kb3", None),
+                getattr(s, "kb2", None),
+                getattr(s, "kb1", None),
+                getattr(s, "calc_2025", None),
+                getattr(s, "current", None),
+            ]
+        )
+    # number formats for summary numeric cols
+    for r in range(6, ws.max_row + 1):
+        for c in range(3, 8):
+            ws.cell(row=r, column=c).number_format = "0.00"
+
+    ws.append([])
+    ws.append([])
+
+    # Main table
+    start_main = ws.max_row + 1
+    _set_row(["Таблица требований"], bold_row=True, fill=fill_hdr)
+    ws.merge_cells(start_row=start_main, start_column=1, end_row=start_main, end_column=6)
+    ws.cell(row=start_main, column=1).alignment = Alignment(horizontal="left", vertical="center")
+    _set_row(["Требование", "Сокращение", "КБ3", "КБ2", "КБ1", "Источник"], bold_row=True, fill=fill_hdr)
+
+    # rows are UibRowView
+    for rv in rows:
+        row = getattr(rv, "row", None)
+        kind = getattr(row, "kind", "") if row else ""
+        if kind == "group":
+            ws.append([getattr(row, "title", ""), getattr(row, "short_name", ""), "", "", "", ""])
+            ws.cell(row=ws.max_row, column=1).font = bold
+            ws.cell(row=ws.max_row, column=1).fill = fill_hdr
+            for c in range(1, 7):
+                ws.cell(row=ws.max_row, column=c).alignment = wrap
+            continue
+
+        v = getattr(rv, "value", None)
+        src = getattr(rv, "source", "")
+        ws.append([getattr(row, "title", ""), getattr(row, "short_name", ""), v, v, v, src])
+        ws.cell(row=ws.max_row, column=1).alignment = wrap
+        ws.cell(row=ws.max_row, column=2).alignment = wrap
+        for c in (3, 4, 5):
+            ws.cell(row=ws.max_row, column=c).number_format = "0.0"
+            ws.cell(row=ws.max_row, column=c).alignment = center
+
+    # Freeze header for main table (keep UX for long lists)
+    ws.freeze_panes = ws.cell(row=start_main + 2, column=1)  # after main header row
+
+    # Simple column widths
+    widths = {1: 70, 2: 18, 3: 10, 4: 10, 5: 10, 6: 12, 7: 22}
+    for idx, w in widths.items():
+        ws.column_dimensions[get_column_letter(idx)].width = w
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+@router.get("/auditor/index-kb/uib/export.xlsx")
+def auditor_index_kb_uib_export_xlsx(
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+    org_id: int = 0,
+) -> Response:
+    if not org_id:
+        raise HTTPException(status_code=400, detail="org_id обязателен")
+    _require_auditor_or_admin_for_org(db, user, org_id)
+    template_path = settings.index_kb_template_path
+    if not template_path or not os.path.exists(template_path):
+        raise HTTPException(status_code=400, detail="Не найден эталонный шаблон Индекс КБ (.xlsx).")
+
+    org, tpl, rows = build_uib_view(db, org_id=org_id, template_path=template_path, actor=user)
+    from app.index_kb.uib_sheet import compute_uib_summary
+
+    summary_rows = compute_uib_summary(rows)
+    content = _build_uib_export_xlsx(org_name=org.name, sheet_title=UIB_SHEET_NAME, summary_rows=summary_rows, rows=rows)
+
+    date_str = datetime.utcnow().date().isoformat()
+    filename_utf8 = f"uib_{org.name}_{date_str}.xlsx"
+    cd = _download_content_disposition(filename_utf8, fallback_prefix=f"uib_org{org_id}_{date_str}")
+    return Response(
+        content=content,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": cd},
+    )
+
+
+@router.get("/my/index-kb/uib/export.xlsx")
+def my_index_kb_uib_export_xlsx(
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+    org_id: int = 0,
+) -> Response:
+    if not org_id:
+        raise HTTPException(status_code=400, detail="org_id обязателен")
+    orgs, org = _get_customer_selected_org(db, user, org_id)
+    template_path = settings.index_kb_template_path
+    if not template_path or not os.path.exists(template_path):
+        raise HTTPException(status_code=400, detail="Не найден эталонный шаблон Индекс КБ (.xlsx).")
+
+    org_obj, tpl, rows = build_uib_view(db, org_id=org.id, template_path=template_path, actor=user)
+    from app.index_kb.uib_sheet import compute_uib_summary
+
+    summary_rows = compute_uib_summary(rows)
+    content = _build_uib_export_xlsx(org_name=org_obj.name, sheet_title=UIB_SHEET_NAME, summary_rows=summary_rows, rows=rows)
+
+    date_str = datetime.utcnow().date().isoformat()
+    filename_utf8 = f"uib_{org_obj.name}_{date_str}.xlsx"
+    cd = _download_content_disposition(filename_utf8, fallback_prefix=f"uib_org{org_id}_{date_str}")
+    return Response(
+        content=content,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": cd},
+    )
 
 @router.post("/auditor/index-kb/uib/manual")
 def auditor_index_kb_uib_save_manual(
@@ -2644,7 +3166,7 @@ def admin_audit_log_page(
 
     # filter options
     users = db.query(User).order_by(User.login.asc()).all()
-    orgs = db.query(Organization).order_by(Organization.name.asc()).all()
+    orgs = _filter_out_default_orgs(db.query(Organization).order_by(Organization.name.asc()).all())
     actions = [a for (a,) in db.query(AuditLog.action).distinct().order_by(AuditLog.action.asc()).limit(300).all()]
     entity_types = [t for (t,) in db.query(AuditLog.entity_type).distinct().order_by(AuditLog.entity_type.asc()).limit(300).all()]
 
@@ -3266,8 +3788,10 @@ def admin_users(
     if page_size > 200:
         page_size = 200
 
-    orgs = db.query(Organization).order_by(Organization.name.asc()).all()
+    orgs = _filter_out_default_orgs(db.query(Organization).order_by(Organization.name.asc()).all())
     selected_org_id = int(org_id) if (org_id and str(org_id).isdigit()) else None
+    if selected_org_id and selected_org_id not in {o.id for o in orgs}:
+        selected_org_id = None
     selected_org_name = ""
     if selected_org_id:
         for o in orgs:
