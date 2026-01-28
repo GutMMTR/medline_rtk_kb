@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import re
+import time
 from dataclasses import dataclass
 from functools import lru_cache
 
@@ -10,7 +11,7 @@ from sqlalchemy import and_, case, func
 from sqlalchemy.orm import joinedload
 from sqlalchemy.orm import Session
 
-from app.db.models import Artifact, IndexKbManualValue, OrgArtifact, OrgArtifactStatus, Organization, User
+from app.db.models import Artifact, IndexKbManualValue, IndexKbTemplateRow, OrgArtifact, OrgArtifactStatus, Organization, User
 
 
 UIB_SHEET_NAME = "Управление ИБ"
@@ -131,6 +132,74 @@ def _load_uib_template_cached(path: str, mtime_ns: int) -> UibTemplate:
 def get_uib_template(path: str) -> UibTemplate:
     st = os.stat(path)
     return _load_uib_template_cached(path, st.st_mtime_ns)
+
+
+def _get_template_rev(db: Session, sheet_name: str) -> int:
+    rev = db.query(func.max(IndexKbTemplateRow.id)).filter(IndexKbTemplateRow.sheet_name == sheet_name).scalar()
+    return int(rev or 0)
+
+
+def _load_template_rows_from_db(db: Session, sheet_name: str) -> list[UibRow]:
+    rows = (
+        db.query(IndexKbTemplateRow)
+        .filter(IndexKbTemplateRow.sheet_name == sheet_name)
+        .order_by(IndexKbTemplateRow.sort_order.asc(), IndexKbTemplateRow.id.asc())
+        .all()
+    )
+    out: list[UibRow] = []
+    for r in rows:
+        out.append(
+            UibRow(
+                kind=(r.kind or "item"),
+                row_key=(r.row_key or ""),
+                title=(r.title or ""),
+                short_name=(r.short_name or ""),
+                group_code=(r.group_code or ""),
+            )
+        )
+    return out
+
+
+def get_uib_template_from_db(db: Session) -> UibTemplate | None:
+    rows = _load_template_rows_from_db(db, UIB_SHEET_NAME)
+    if not rows:
+        return None
+    rev = _get_template_rev(db, UIB_SHEET_NAME)
+    return UibTemplate(path="", mtime_ns=rev, header_row=0, col_title=2, col_short=3, rows=rows)
+
+
+def get_uib_template_rev(db: Session) -> int:
+    return _get_template_rev(db, UIB_SHEET_NAME)
+
+
+def ensure_uib_template_loaded(db: Session, *, template_path: str | None, force: bool = False) -> int:
+    """
+    Загружает структуру листа "Управление ИБ" в БД (один раз).
+    Возвращает количество строк в шаблоне.
+    """
+    existing_cnt = db.query(func.count(IndexKbTemplateRow.id)).filter(IndexKbTemplateRow.sheet_name == UIB_SHEET_NAME).scalar()
+    if int(existing_cnt or 0) > 0 and not force:
+        return int(existing_cnt or 0)
+
+    if not template_path or not os.path.exists(template_path):
+        raise RuntimeError("Шаблон УИБ не загружен в БД и Excel-эталон не найден. Нужна загрузка шаблона в БД.")
+
+    tpl = get_uib_template(template_path)
+    db.query(IndexKbTemplateRow).filter(IndexKbTemplateRow.sheet_name == UIB_SHEET_NAME).delete(synchronize_session=False)
+    for i, r in enumerate(tpl.rows, start=1):
+        db.add(
+            IndexKbTemplateRow(
+                sheet_name=UIB_SHEET_NAME,
+                sort_order=i,
+                kind=r.kind,
+                row_key=r.row_key,
+                title=r.title,
+                short_name=r.short_name,
+                group_code=r.group_code,
+            )
+        )
+    db.commit()
+    return len(tpl.rows)
 
 
 def compute_auto_scores(db: Session, org_id: int, short_names: list[str]) -> dict[str, float]:
@@ -256,9 +325,29 @@ def build_uib_view(db: Session, *, org_id: int, template_path: str, actor: User)
     if not org:
         raise RuntimeError("Организация не найдена")
 
-    tpl = get_uib_template(template_path)
+    tpl = get_uib_template_from_db(db)
+    if not tpl:
+        # Dev fallback: lazy import from xlsx once.
+        ensure_uib_template_loaded(db, template_path=template_path, force=False)
+        tpl = get_uib_template_from_db(db)
+    if not tpl:
+        raise RuntimeError("Шаблон УИБ не загружен в БД")
     short_names = [r.short_name for r in tpl.rows if r.kind == "item" and r.short_name]
-    auto = compute_auto_scores(db, org_id, short_names)
+
+    # Small TTL cache for auto scores to avoid repeated DB load on refresh.
+    global _UIB_AUTO_CACHE
+    try:
+        _UIB_AUTO_CACHE
+    except NameError:
+        _UIB_AUTO_CACHE = {}  # type: ignore[var-annotated]
+    cache_key = (int(org_id), int(tpl.mtime_ns))
+    now = time.time()
+    cached = _UIB_AUTO_CACHE.get(cache_key)  # type: ignore[name-defined]
+    if cached and (now - float(cached[0])) < 15.0:
+        auto = cached[1]
+    else:
+        auto = compute_auto_scores(db, org_id, short_names)
+        _UIB_AUTO_CACHE[cache_key] = (now, auto)  # type: ignore[name-defined]
     manual = load_manual_values(db, org_id, UIB_SHEET_NAME)
 
     out: list[UibRowView] = []

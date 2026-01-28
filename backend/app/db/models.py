@@ -309,3 +309,28 @@ class IndexKbManualValue(Base):
 
     org: Mapped[Organization] = relationship()
     updated_by: Mapped["User | None"] = relationship(foreign_keys=[updated_by_user_id])
+
+
+class IndexKbTemplateRow(Base):
+    """
+    Структура строк "Индекс КБ" (группы/пункты) по листам.
+
+    Важно: это НЕ значения по организации, а именно "шаблон", который загружается один раз
+    (из Excel-эталона или иного источника) и дальше используется UI/выгрузками без парсинга .xlsx.
+    """
+
+    __tablename__ = "index_kb_template_rows"
+    __table_args__ = (
+        UniqueConstraint("sheet_name", "row_key", name="uq_index_kb_template_sheet_row"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    sheet_name: Mapped[str] = mapped_column(String(255), nullable=False, default="", index=True)
+    sort_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0, index=True)
+
+    kind: Mapped[str] = mapped_column(String(32), nullable=False, default="item")  # group|item
+    row_key: Mapped[str] = mapped_column(String(255), nullable=False, default="")  # stable id (e.g. "СЗИ.X.Y" / "group:ABC")
+
+    title: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    short_name: Mapped[str] = mapped_column(String(255), nullable=False, default="")
+    group_code: Mapped[str] = mapped_column(String(255), nullable=False, default="")

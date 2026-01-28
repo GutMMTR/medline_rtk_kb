@@ -1,0 +1,163 @@
+{% extends "base.html" %}
+{% block content %}
+  <div class="section-header">
+    <div>
+      <h2 style="margin:0">Индекс КБ · {{ sheet_name }}</h2>
+      <div class="muted">
+        Упрощённая форма: КБ1/КБ2/КБ3 заполняются одинаково по статусу артефакта (5/0). Учитываем только «проаудировано».
+        {% if items_count is defined and groups_count is defined and selected_org_id %}
+          <span class="mono">Строк: {{ items_count }}, групп: {{ groups_count }}</span>
+        {% endif %}
+      </div>
+    </div>
+    <div class="row-right">
+      {% set _base = base_prefix or "/auditor" %}
+      {% set _files = files_base or (_base ~ "/files") %}
+      {% set _art = artifacts_base or (_base ~ "/artifacts") %}
+      {% if show_org_selector is not defined or show_org_selector %}
+        <form method="get" action="{{ _base }}/index-kb/szi" class="header-inline-form {% if org_picker_error %}org-picker--error{% endif %}">
+          <label style="margin:0">Организация</label>
+          <select name="org_id" onchange="this.form.submit()" data-org-autocomplete="1" data-auto-submit="1" data-placeholder="Поиск организации…">
+            <option value="" {% if not selected_org_id %}selected{% endif %}></option>
+            {% for o in orgs %}
+              <option value="{{ o.id }}" {% if o.id == selected_org_id %}selected{% endif %}>{{ o.name }}</option>
+            {% endfor %}
+          </select>
+        </form>
+      {% endif %}
+      {% if selected_org_id %}
+        <a class="btn btn-secondary" href="{{ _base }}/index-kb/szi/export.xlsx?org_id={{ selected_org_id }}">Выгрузить Excel</a>
+        <a class="btn btn-secondary" href="{{ _base }}/index-kb?org_id={{ selected_org_id }}&sheet={{ sheet_name }}" title="Вернуться к основной странице Индекса КБ (Excel-вид)">Индекс КБ</a>
+        <a class="btn btn-secondary" href="{{ _art }}?org_id={{ selected_org_id }}">Артефакты</a>
+        <a class="btn btn-secondary" href="{{ _files }}?org_id={{ selected_org_id }}">Файлы</a>
+      {% else %}
+        <a class="btn btn-secondary" href="#" onclick="return false" style="pointer-events:none;opacity:.55" title="Выберите организацию">Выгрузить Excel</a>
+        <a class="btn btn-secondary" href="#" onclick="return false" style="pointer-events:none;opacity:.55" title="Выберите организацию">Индекс КБ</a>
+        <a class="btn btn-secondary" href="{{ _art }}">Артефакты</a>
+        <a class="btn btn-secondary" href="{{ _files }}">Файлы</a>
+      {% endif %}
+    </div>
+  </div>
+
+  {% if not selected_org_id %}
+    <div class="card">
+      <div class="muted">Выберите организацию вверху — после этого появятся таблицы и выгрузка в Excel.</div>
+    </div>
+  {% endif %}
+
+  {% if error %}
+    <div class="card">
+      <div class="error">{{ error }}</div>
+      <div class="hint">Ожидаем файл по пути: <span class="mono">{{ template_path }}</span> (монтируется из <span class="mono">docs/</span>).</div>
+    </div>
+  {% elif selected_org_id %}
+    <div class="card">
+      <div class="section-header" style="margin-bottom:10px">
+        <h3 style="margin:0">Итоговая таблица</h3>
+        <div class="muted">Средние значения по категориям (как в Excel).</div>
+      </div>
+      <div class="table-wrap">
+        <table class="table">
+          <thead>
+            <tr>
+              <th style="min-width:360px">Категория</th>
+              <th style="width:160px">Сокращенное наименование</th>
+              <th class="kb-head kb-kb3">КБ3</th>
+              <th class="kb-head kb-kb2">КБ2</th>
+              <th class="kb-head kb-kb1">КБ1</th>
+              <th style="width:190px">Расчетный показатель 2025</th>
+              <th style="width:160px">Текущий показатель</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for s in summary_rows %}
+              <tr>
+                <td><b>{{ s.title }}</b></td>
+                <td class="mono">
+                  {% if s.short_name %}
+                    <a href="{{ _files }}?org_id={{ selected_org_id }}&path={{ s.short_name|replace('.', '/')|urlencode }}" class="kb-short-link">
+                      {{ s.short_name }}
+                    </a>
+                  {% else %}
+                    —
+                  {% endif %}
+                </td>
+                <td class="kb-cell kb-kb3">{% if s.kb3 is not none %}{{ "%.2f"|format(s.kb3) }}{% else %}—{% endif %}</td>
+                <td class="kb-cell kb-kb2">{% if s.kb2 is not none %}{{ "%.2f"|format(s.kb2) }}{% else %}—{% endif %}</td>
+                <td class="kb-cell kb-kb1">{% if s.kb1 is not none %}{{ "%.2f"|format(s.kb1) }}{% else %}—{% endif %}</td>
+                <td>{% if s.calc_2025 is not none %}{{ "%.2f"|format(s.calc_2025) }}{% else %}—{% endif %}</td>
+                <td>{% if s.current is not none %}{{ "%.2f"|format(s.current) }}{% else %}—{% endif %}</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="table-wrap">
+        <table class="table">
+          <thead>
+            <tr>
+              <th style="min-width:520px">Требование</th>
+              <th style="width:200px">Сокращенное наименование</th>
+              <th class="kb-head kb-kb3">КБ3</th>
+              <th class="kb-head kb-kb2">КБ2</th>
+              <th class="kb-head kb-kb1">КБ1</th>
+              <th style="width:140px">Источник</th>
+              {% if not readonly %}
+                <th style="width:240px">Ручной ввод</th>
+              {% endif %}
+            </tr>
+          </thead>
+          <tbody>
+            {% for rv in rows %}
+              {% if rv.row.kind == "group" %}
+                <tr class="row-group">
+                  <td colspan="{% if not readonly %}7{% else %}6{% endif %}"><b>{{ rv.row.title }}</b> <span class="muted mono">{{ rv.row.short_name }}</span></td>
+                </tr>
+              {% else %}
+                <tr>
+                  <td>{{ rv.row.title }}</td>
+                  <td class="mono">
+                    {% if rv.row.short_name %}
+                      <a href="{{ _files }}?org_id={{ selected_org_id }}&path={{ rv.row.short_name|replace('.', '/')|urlencode }}" class="kb-short-link">
+                        {{ rv.row.short_name }}
+                      </a>
+                    {% else %}
+                      —
+                    {% endif %}
+                  </td>
+                  <td class="kb-cell kb-kb3">{% if rv.value is not none %}{{ "%.1f"|format(rv.value) }}{% else %}—{% endif %}</td>
+                  <td class="kb-cell kb-kb2">{% if rv.value is not none %}{{ "%.1f"|format(rv.value) }}{% else %}—{% endif %}</td>
+                  <td class="kb-cell kb-kb1">{% if rv.value is not none %}{{ "%.1f"|format(rv.value) }}{% else %}—{% endif %}</td>
+                  <td class="muted">{{ rv.source }}</td>
+                  {% if not readonly %}
+                    <td>
+                      {% if rv.source != "auto" %}
+                        <form method="post" action="{{ _base }}/index-kb/szi/manual" class="kb-form">
+                          <input type="hidden" name="org_id" value="{{ selected_org_id }}" />
+                          <input type="hidden" name="row_key" value="{{ rv.row.row_key }}" />
+                          <input class="kb-input" type="number" name="value" step="0.1" min="0" max="5" value="{% if rv.value is not none %}{{ "%.1f"|format(rv.value) }}{% endif %}" placeholder="0..5" />
+                          <button class="btn btn-secondary" type="submit">Сохранить</button>
+                        </form>
+                        {% if rv.updated_at %}
+                          <div class="muted" style="margin-top:4px;font-size:12px">
+                            {{ rv.updated_by }} · <span class="dt" data-dt-utc="{{ rv.updated_at.isoformat() }}Z">—</span>
+                          </div>
+                        {% endif %}
+                      {% else %}
+                        <span class="muted">авто</span>
+                      {% endif %}
+                    </td>
+                  {% endif %}
+                </tr>
+              {% endif %}
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  {% endif %}
+{% endblock %}
+

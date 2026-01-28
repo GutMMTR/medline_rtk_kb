@@ -66,8 +66,35 @@
           </div>
         {% endif %}
 
+        {% if selected_org_id %}
+          <a class="admin-tile" href="{{ _base }}/index-kb/szi?org_id={{ selected_org_id }}">
+            <div class="admin-tile-icon">
+              <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" focusable="false">
+                <path fill="currentColor" d="M6 2h9l3 3v17H6V2zm8 1v4h4"/>
+                <path fill="currentColor" d="M8 10h8v2H8v-2zm0 4h8v2H8v-2z"/>
+              </svg>
+            </div>
+            <div>
+              <div class="admin-tile-title">СЗИ</div>
+            </div>
+          </a>
+        {% else %}
+          <div class="admin-tile admin-tile--disabled" aria-disabled="true" title="Выберите организацию">
+            <div class="admin-tile-icon">
+              <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" focusable="false">
+                <path fill="currentColor" d="M6 2h9l3 3v17H6V2zm8 1v4h4"/>
+                <path fill="currentColor" d="M8 10h8v2H8v-2zm0 4h8v2H8v-2z"/>
+              </svg>
+            </div>
+            <div>
+              <div class="admin-tile-title">СЗИ</div>
+              <div class="admin-tile-desc">Выберите организацию</div>
+            </div>
+          </div>
+        {% endif %}
+
         {% for s in sheet_names %}
-          {% if s != "Управление ИБ" %}
+          {% if s != "Управление ИБ" and s != "СЗИ" %}
             <div class="admin-tile admin-tile--disabled" aria-disabled="true" title="В разработке">
               <div class="admin-tile-icon">
                 <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" focusable="false">

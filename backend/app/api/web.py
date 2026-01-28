@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import io
 import os
+import time
 import subprocess
 import tempfile
 from datetime import datetime, timezone
@@ -50,7 +51,14 @@ from app.index_kb.excel_fill import fill_workbook_for_org
 from app.index_kb.formula_eval import build_evaluator_from_openpyxl_workbook
 from app.index_kb.sheet_render import iter_render_rows
 from app.index_kb.template_loader import get_index_kb_template
-from app.index_kb.uib_sheet import UIB_SHEET_NAME, build_uib_view, upsert_manual_value
+from app.index_kb.uib_sheet import (
+    UIB_SHEET_NAME,
+    build_uib_view,
+    get_uib_template_from_db,
+    get_uib_template_rev,
+    upsert_manual_value,
+)
+from app.index_kb.szi_sheet import SZI_SHEET_NAME, build_szi_view, get_szi_template_from_db, get_szi_template_rev
 from app.integrations.nextcloud_dav import NextcloudDavClient, build_webdav_base_url
 from app.integrations.nextcloud_sync import sync_from_nextcloud
 
@@ -782,7 +790,7 @@ def my_index_kb_uib_page(
 
     selected_org_id = org.id
     template_path = settings.index_kb_template_path
-    if not template_path or not os.path.exists(template_path):
+    if not get_uib_template_from_db(db) and (not template_path or not os.path.exists(template_path)):
         resp = templates.TemplateResponse(
             "auditor_index_kb_uib.html",
             {
@@ -792,7 +800,7 @@ def my_index_kb_uib_page(
                 "orgs": orgs,
                 "selected_org_id": selected_org_id,
                 "template_path": template_path,
-                "error": "Не найден эталонный шаблон Индекс КБ (.xlsx).",
+                "error": "Шаблон УИБ не загружен в БД.",
                 "rows": [],
                 "summary_rows": [],
                 "sheet_name": UIB_SHEET_NAME,
@@ -1815,42 +1823,60 @@ def auditor_index_kb_uib_page(
         org_picker_error = True
 
     template_path = settings.index_kb_template_path
-    if not template_path or not os.path.exists(template_path):
-        resp = templates.TemplateResponse(
-            "auditor_index_kb_uib.html",
-            {
-                "request": request,
-                "user": user,
-                "container_class": "container-wide",
-                "orgs": orgs,
-                "selected_org_id": selected_org_id,
-                "template_path": template_path,
-                "error": "Не найден эталонный шаблон Индекс КБ (.xlsx).",
-                "rows": [],
-                "summary_rows": [],
-                "sheet_name": UIB_SHEET_NAME,
-                "org": None,
-                "base_prefix": "/auditor",
-                "files_base": "/auditor/files",
-                "artifacts_base": "/auditor/artifacts",
-                "show_org_selector": True,
-                "readonly": False,
-                "org_picker_error": org_picker_error,
-            },
-            status_code=200,
-        )
-        resp.headers["Cache-Control"] = "no-store, max-age=0"
-        resp.headers["Pragma"] = "no-cache"
-        return resp
+
+    # Cache full view for snappy reloads. Keyed by (org_id, template_rev).
+    global _UIB_VIEW_CACHE
+    try:
+        _UIB_VIEW_CACHE
+    except NameError:
+        _UIB_VIEW_CACHE = {}  # type: ignore[var-annotated]
 
     rows: list[object] = []
     summary_rows: list[object] = []
     org = None
     if selected_org_id:
-        org, tpl, rows = build_uib_view(db, org_id=selected_org_id, template_path=template_path, actor=user)
-        from app.index_kb.uib_sheet import compute_uib_summary
+        # If template is not loaded in DB and we have no xlsx path, show a clear error.
+        if not get_uib_template_from_db(db) and (not template_path or not os.path.exists(template_path)):
+            resp = templates.TemplateResponse(
+                "auditor_index_kb_uib.html",
+                {
+                    "request": request,
+                    "user": user,
+                    "container_class": "container-wide",
+                    "orgs": orgs,
+                    "selected_org_id": selected_org_id,
+                    "template_path": template_path,
+                    "error": "Шаблон УИБ не загружен в БД. Загрузите его один раз командой: "
+                    "python -m app.cli.index_kb_load_template --sheet uib",
+                    "rows": [],
+                    "summary_rows": [],
+                    "sheet_name": UIB_SHEET_NAME,
+                    "org": None,
+                    "base_prefix": "/auditor",
+                    "files_base": "/auditor/files",
+                    "artifacts_base": "/auditor/artifacts",
+                    "show_org_selector": True,
+                    "readonly": False,
+                    "org_picker_error": org_picker_error,
+                },
+                status_code=200,
+            )
+            resp.headers["Cache-Control"] = "no-store, max-age=0"
+            resp.headers["Pragma"] = "no-cache"
+            return resp
 
-        summary_rows = compute_uib_summary(rows)
+        tpl_rev = get_uib_template_rev(db)
+        cache_key = (int(selected_org_id), int(tpl_rev))
+        now = time.time()
+        cached = _UIB_VIEW_CACHE.get(cache_key)  # type: ignore[name-defined]
+        if cached and (now - float(cached[0])) < 20.0:
+            org, rows, summary_rows = cached[1], cached[2], cached[3]
+        else:
+            org, tpl, rows = build_uib_view(db, org_id=selected_org_id, template_path=template_path, actor=user)
+            from app.index_kb.uib_sheet import compute_uib_summary
+
+            summary_rows = compute_uib_summary(rows)
+            _UIB_VIEW_CACHE[cache_key] = (now, org, rows, summary_rows)  # type: ignore[name-defined]
     resp = templates.TemplateResponse(
         "auditor_index_kb_uib.html",
         {
@@ -1891,7 +1917,7 @@ def _build_uib_export_xlsx(
     """
     wb = Workbook()
     ws = wb.active
-    ws.title = "Управление ИБ"
+    ws.title = sheet_title or "Лист"
 
     bold = Font(bold=True)
     title_font = Font(bold=True, size=14)
@@ -2010,8 +2036,8 @@ def auditor_index_kb_uib_export_xlsx(
         raise HTTPException(status_code=400, detail="org_id обязателен")
     _require_auditor_or_admin_for_org(db, user, org_id)
     template_path = settings.index_kb_template_path
-    if not template_path or not os.path.exists(template_path):
-        raise HTTPException(status_code=400, detail="Не найден эталонный шаблон Индекс КБ (.xlsx).")
+    if not get_uib_template_from_db(db) and (not template_path or not os.path.exists(template_path)):
+        raise HTTPException(status_code=400, detail="Шаблон УИБ не загружен в БД.")
 
     org, tpl, rows = build_uib_view(db, org_id=org_id, template_path=template_path, actor=user)
     from app.index_kb.uib_sheet import compute_uib_summary
@@ -2040,8 +2066,8 @@ def my_index_kb_uib_export_xlsx(
         raise HTTPException(status_code=400, detail="org_id обязателен")
     orgs, org = _get_customer_selected_org(db, user, org_id)
     template_path = settings.index_kb_template_path
-    if not template_path or not os.path.exists(template_path):
-        raise HTTPException(status_code=400, detail="Не найден эталонный шаблон Индекс КБ (.xlsx).")
+    if not get_uib_template_from_db(db) and (not template_path or not os.path.exists(template_path)):
+        raise HTTPException(status_code=400, detail="Шаблон УИБ не загружен в БД.")
 
     org_obj, tpl, rows = build_uib_view(db, org_id=org.id, template_path=template_path, actor=user)
     from app.index_kb.uib_sheet import compute_uib_summary
@@ -2052,6 +2078,185 @@ def my_index_kb_uib_export_xlsx(
     date_str = datetime.utcnow().date().isoformat()
     filename_utf8 = f"uib_{org_obj.name}_{date_str}.xlsx"
     cd = _download_content_disposition(filename_utf8, fallback_prefix=f"uib_org{org_id}_{date_str}")
+    return Response(
+        content=content,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": cd},
+    )
+
+
+@router.get("/auditor/index-kb/szi", response_class=HTMLResponse)
+def auditor_index_kb_szi_page(
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+    org_id: int | None = None,
+) -> HTMLResponse:
+    t0 = time.perf_counter()
+    orgs_all = _get_accessible_orgs_for_auditor(db, user)
+    orgs = orgs_all
+    if not orgs:
+        return templates.TemplateResponse(
+            "empty.html",
+            {"request": request, "user": user, "message": "Нет доступных организаций. Обратитесь к администратору."},
+        )
+
+    allowed_ids = {o.id for o in orgs}
+    selected_org_id: int | None = None
+    org_picker_error = False
+    if org_id and org_id in allowed_ids:
+        selected_org_id = org_id
+        _require_auditor_or_admin_for_org(db, user, selected_org_id)
+    else:
+        org_picker_error = True
+
+    template_path = settings.index_kb_template_path
+
+    # Cache full view for snappy reloads. Keyed by (org_id, template_mtime_ns).
+    global _SZI_VIEW_CACHE
+    try:
+        _SZI_VIEW_CACHE
+    except NameError:
+        _SZI_VIEW_CACHE = {}  # type: ignore[var-annotated]
+
+    rows: list[object] = []
+    summary_rows: list[object] = []
+    org = None
+    items_count = 0
+    groups_count = 0
+    if selected_org_id:
+        # If template is not loaded in DB and we have no xlsx path, show a clear error.
+        if not get_szi_template_from_db(db) and (not template_path or not os.path.exists(template_path)):
+            resp = templates.TemplateResponse(
+                "auditor_index_kb_szi.html",
+                {
+                    "request": request,
+                    "user": user,
+                    "container_class": "container-wide",
+                    "orgs": orgs,
+                    "selected_org_id": selected_org_id,
+                    "template_path": template_path,
+                    "error": "Шаблон СЗИ не загружен в БД. Загрузите его один раз командой: "
+                    "python -m app.cli.index_kb_load_template --sheet szi",
+                    "rows": [],
+                    "summary_rows": [],
+                    "sheet_name": SZI_SHEET_NAME,
+                    "org": None,
+                    "base_prefix": "/auditor",
+                    "files_base": "/auditor/files",
+                    "artifacts_base": "/auditor/artifacts",
+                    "show_org_selector": True,
+                    "readonly": False,
+                    "org_picker_error": org_picker_error,
+                },
+                status_code=200,
+            )
+            resp.headers["Cache-Control"] = "no-store, max-age=0"
+            resp.headers["Pragma"] = "no-cache"
+            return resp
+        t1 = time.perf_counter()
+        tpl_rev = get_szi_template_rev(db)
+        cache_key = (int(selected_org_id), int(tpl_rev))
+        now = time.time()
+        cached = _SZI_VIEW_CACHE.get(cache_key)  # type: ignore[name-defined]
+        if cached and (now - float(cached[0])) < 20.0:
+            org, rows, summary_rows = cached[1], cached[2], cached[3]
+            t_build = 0.0
+            t_sum = 0.0
+        else:
+            org, tpl, rows = build_szi_view(db, org_id=selected_org_id, template_path=template_path, actor=user)
+            t2 = time.perf_counter()
+            from app.index_kb.szi_sheet import compute_szi_summary
+
+            summary_rows = compute_szi_summary(rows)
+            t3 = time.perf_counter()
+            _SZI_VIEW_CACHE[cache_key] = (now, org, rows, summary_rows)  # type: ignore[name-defined]
+            t_build = (t2 - t1) * 1000.0
+            t_sum = (t3 - t2) * 1000.0
+        try:
+            items_count = sum(1 for rv in rows if getattr(getattr(rv, "row", None), "kind", "") == "item")
+            groups_count = sum(1 for rv in rows if getattr(getattr(rv, "row", None), "kind", "") == "group")
+        except Exception:
+            items_count = 0
+            groups_count = 0
+        t4 = time.perf_counter()
+        print(
+            f"[perf] szi org_id={selected_org_id} build_ms={t_build:.1f} sum_ms={t_sum:.1f} counts_ms={(t4 - t1) * 1000.0:.1f} total_ms={(t4 - t0) * 1000.0:.1f}"
+        )
+
+    resp = templates.TemplateResponse(
+        "auditor_index_kb_szi.html",
+        {
+            "request": request,
+            "user": user,
+            "container_class": "container-wide",
+            "orgs": orgs,
+            "selected_org_id": selected_org_id,
+            "org": org,
+            "sheet_name": SZI_SHEET_NAME,
+            "rows": rows,
+            "summary_rows": summary_rows,
+            "items_count": items_count,
+            "groups_count": groups_count,
+            "error": None,
+            "base_prefix": "/auditor",
+            "files_base": "/auditor/files",
+            "artifacts_base": "/auditor/artifacts",
+            "show_org_selector": True,
+            "readonly": False,
+            "org_picker_error": org_picker_error,
+        },
+    )
+    resp.headers["Cache-Control"] = "no-store, max-age=0"
+    resp.headers["Pragma"] = "no-cache"
+    return resp
+
+
+@router.post("/auditor/index-kb/szi/manual")
+def auditor_index_kb_szi_save_manual(
+    request: Request,
+    org_id: int = Form(...),
+    row_key: str = Form(...),
+    value: str = Form(""),
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> Response:
+    _require_auditor_or_admin_for_org(db, user, org_id)
+    try:
+        v = float(value) if (value or "").strip() else 0.0
+    except Exception:
+        v = 0.0
+    from app.index_kb.szi_sheet import upsert_manual_value
+
+    upsert_manual_value(db, org_id=org_id, sheet_name=SZI_SHEET_NAME, row_key=row_key, value=v, actor=user)
+    db.commit()
+    ref = request.headers.get("referer") or f"/auditor/index-kb/szi?org_id={org_id}"
+    return _redirect(ref)
+
+
+@router.get("/auditor/index-kb/szi/export.xlsx")
+def auditor_index_kb_szi_export_xlsx(
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+    org_id: int = 0,
+) -> Response:
+    if not org_id:
+        raise HTTPException(status_code=400, detail="org_id обязателен")
+    _require_auditor_or_admin_for_org(db, user, org_id)
+    template_path = settings.index_kb_template_path
+    if not template_path or not os.path.exists(template_path):
+        raise HTTPException(status_code=400, detail="Не найден эталонный шаблон Индекс КБ (.xlsx).")
+
+    org, tpl, rows = build_szi_view(db, org_id=org_id, template_path=template_path, actor=user)
+    from app.index_kb.szi_sheet import compute_szi_summary
+
+    summary_rows = compute_szi_summary(rows)
+    content = _build_uib_export_xlsx(org_name=org.name, sheet_title=SZI_SHEET_NAME, summary_rows=summary_rows, rows=rows)
+
+    date_str = datetime.utcnow().date().isoformat()
+    filename_utf8 = f"szi_{org.name}_{date_str}.xlsx"
+    cd = _download_content_disposition(filename_utf8, fallback_prefix=f"szi_org{org_id}_{date_str}")
     return Response(
         content=content,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
