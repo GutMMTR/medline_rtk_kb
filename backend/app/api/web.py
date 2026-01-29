@@ -68,6 +68,26 @@ templates = Jinja2Templates(directory="app/templates")
 
 DEFAULT_ORG_NAME = "Default"
 
+# Индекс КБ: список листов/плиток как в эталонном Excel.
+# Реализованы интерактивно только "Управление ИБ" и "СЗИ", остальные помечаем как "Скоро".
+INDEX_KB_SHEET_TILES: list[str] = [
+    "Управление ИБ",
+    "Описание",
+    "Итог",
+    "Расчет",
+    "Программа",
+    "Нормативное соответствие",
+    "250",
+    "СЗИ",
+    "Мониторинг",
+    "Реагирование",
+    "Восстановление",
+    "Светофор",
+    "Условные сокращения",
+    "Приоритет",
+    "Экспресс",
+]
+
 
 def _filter_out_default_orgs(orgs: list[Organization]) -> list[Organization]:
     return [o for o in (orgs or []) if (o.name or "").strip() != DEFAULT_ORG_NAME]
@@ -715,32 +735,12 @@ def my_index_kb_page(
         return resp
 
     selected_org_id = org.id
-    template_path = settings.index_kb_template_path
-    if not template_path or not os.path.exists(template_path):
-        resp = templates.TemplateResponse(
-            "auditor_index_kb.html",
-            {
-                "request": request,
-                "user": user,
-                "container_class": "container-wide",
-                "orgs": orgs,
-                "selected_org_id": selected_org_id,
-                "template_path": template_path,
-                "sheet_names": [],
-                "error": "Не найден эталонный шаблон Индекс КБ (.xlsx).",
-                "base_prefix": "/my",
-                "files_base": "/my/files",
-                "artifacts_base": "/my/artifacts",
-                "show_org_selector": len(orgs) > 1,
-            },
-            status_code=200,
-        )
-        resp.headers["Cache-Control"] = "no-store, max-age=0"
-        resp.headers["Pragma"] = "no-cache"
-        return resp
-
-    tpl = get_index_kb_template(template_path)
-    sheet_names = tpl.sheet_names
+    available_sheets: list[str] = []
+    if get_uib_template_from_db(db):
+        available_sheets.append(UIB_SHEET_NAME)
+    if get_szi_template_from_db(db):
+        available_sheets.append(SZI_SHEET_NAME)
+    err = None if available_sheets else "Шаблоны Индекса КБ не загружены в БД (нужны seed‑миграции)."
     resp = templates.TemplateResponse(
         "auditor_index_kb.html",
         {
@@ -749,9 +749,9 @@ def my_index_kb_page(
             "container_class": "container-wide",
             "orgs": orgs,
             "selected_org_id": selected_org_id,
-            "template_path": template_path,
-            "sheet_names": sheet_names,
-            "error": None,
+            "sheet_names": INDEX_KB_SHEET_TILES,
+            "available_sheets": available_sheets,
+            "error": err,
             "base_prefix": "/my",
             "files_base": "/my/files",
             "artifacts_base": "/my/artifacts",
@@ -1639,7 +1639,7 @@ def auditor_files_explorer(
                 "request": request,
                 "user": user,
                 "container_class": "container-wide",
-                "title": "Файлы аудитора",
+                "title": "Файлы",
                 "subtitle": "Выберите организацию, чтобы открыть файловый список.",
                 "action_path": "/auditor/files",
                 "orgs": orgs,
@@ -1753,28 +1753,12 @@ def auditor_index_kb_page(
         # No org selected (or invalid org_id) — show tiles, highlight picker.
         org_picker_error = True
 
-    template_path = settings.index_kb_template_path
-    if not template_path or not os.path.exists(template_path):
-        resp = templates.TemplateResponse(
-            "auditor_index_kb.html",
-            {
-                "request": request,
-                "user": user,
-                "container_class": "container-wide",
-                "orgs": orgs,
-                "selected_org_id": selected_org_id,
-                "template_path": template_path,
-                "error": "Не найден эталонный шаблон Индекс КБ (.xlsx).",
-                "org_picker_error": org_picker_error,
-            },
-            status_code=200,
-        )
-        resp.headers["Cache-Control"] = "no-store, max-age=0"
-        resp.headers["Pragma"] = "no-cache"
-        return resp
-
-    tpl = get_index_kb_template(template_path)
-    sheet_names = tpl.sheet_names
+    available_sheets: list[str] = []
+    if get_uib_template_from_db(db):
+        available_sheets.append(UIB_SHEET_NAME)
+    if get_szi_template_from_db(db):
+        available_sheets.append(SZI_SHEET_NAME)
+    err = None if available_sheets else "Шаблоны Индекса КБ не загружены в БД (нужны seed‑миграции)."
 
     resp = templates.TemplateResponse(
         "auditor_index_kb.html",
@@ -1784,9 +1768,9 @@ def auditor_index_kb_page(
             "container_class": "container-wide",
             "orgs": orgs,
             "selected_org_id": selected_org_id,
-            "sheet_names": sheet_names,
-            "template_path": template_path,
-            "error": None,
+            "sheet_names": INDEX_KB_SHEET_TILES,
+            "available_sheets": available_sheets,
+            "error": err,
             "base_prefix": "/auditor",
             "files_base": "/auditor/files",
             "artifacts_base": "/auditor/artifacts",
@@ -1846,8 +1830,7 @@ def auditor_index_kb_uib_page(
                     "orgs": orgs,
                     "selected_org_id": selected_org_id,
                     "template_path": template_path,
-                    "error": "Шаблон УИБ не загружен в БД. Загрузите его один раз командой: "
-                    "python -m app.cli.index_kb_load_template --sheet uib",
+                    "error": "Шаблон УИБ не загружен в БД. Проверьте, что применены миграции Alembic (в т.ч. seed-миграция).",
                     "rows": [],
                     "summary_rows": [],
                     "sheet_name": UIB_SHEET_NAME,
@@ -2037,7 +2020,7 @@ def auditor_index_kb_uib_export_xlsx(
     _require_auditor_or_admin_for_org(db, user, org_id)
     template_path = settings.index_kb_template_path
     if not get_uib_template_from_db(db) and (not template_path or not os.path.exists(template_path)):
-        raise HTTPException(status_code=400, detail="Шаблон УИБ не загружен в БД.")
+        raise HTTPException(status_code=400, detail="Шаблон УИБ не загружен в БД (нужна seed-миграция).")
 
     org, tpl, rows = build_uib_view(db, org_id=org_id, template_path=template_path, actor=user)
     from app.index_kb.uib_sheet import compute_uib_summary
@@ -2067,7 +2050,7 @@ def my_index_kb_uib_export_xlsx(
     orgs, org = _get_customer_selected_org(db, user, org_id)
     template_path = settings.index_kb_template_path
     if not get_uib_template_from_db(db) and (not template_path or not os.path.exists(template_path)):
-        raise HTTPException(status_code=400, detail="Шаблон УИБ не загружен в БД.")
+        raise HTTPException(status_code=400, detail="Шаблон УИБ не загружен в БД (нужна seed-миграция).")
 
     org_obj, tpl, rows = build_uib_view(db, org_id=org.id, template_path=template_path, actor=user)
     from app.index_kb.uib_sheet import compute_uib_summary
@@ -2136,8 +2119,7 @@ def auditor_index_kb_szi_page(
                     "orgs": orgs,
                     "selected_org_id": selected_org_id,
                     "template_path": template_path,
-                    "error": "Шаблон СЗИ не загружен в БД. Загрузите его один раз командой: "
-                    "python -m app.cli.index_kb_load_template --sheet szi",
+                    "error": "Шаблон СЗИ не загружен в БД. Проверьте, что применены миграции Alembic (в т.ч. seed-миграция).",
                     "rows": [],
                     "summary_rows": [],
                     "sheet_name": SZI_SHEET_NAME,

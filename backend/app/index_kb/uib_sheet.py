@@ -327,11 +327,8 @@ def build_uib_view(db: Session, *, org_id: int, template_path: str, actor: User)
 
     tpl = get_uib_template_from_db(db)
     if not tpl:
-        # Dev fallback: lazy import from xlsx once.
-        ensure_uib_template_loaded(db, template_path=template_path, force=False)
-        tpl = get_uib_template_from_db(db)
-    if not tpl:
-        raise RuntimeError("Шаблон УИБ не загружен в БД")
+        # Important: do NOT parse Excel on first request. Seed must be done via Alembic migration.
+        raise RuntimeError("Шаблон УИБ не загружен в БД (нужна seed-миграция)")
     short_names = [r.short_name for r in tpl.rows if r.kind == "item" and r.short_name]
 
     # Small TTL cache for auto scores to avoid repeated DB load on refresh.

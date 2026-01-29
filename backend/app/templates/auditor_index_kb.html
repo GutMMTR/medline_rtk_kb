@@ -3,7 +3,7 @@
   <div class="section-header">
     <div>
       <h2 style="margin:0">Индекс КБ</h2>
-      <div class="muted">Копия эталонного Excel-отчёта. В ячейках с сокращениями показываем статус по организации.</div>
+      <div class="muted">Формы Индекса КБ. Структура листов хранится в БД (без парсинга Excel при открытии страницы).</div>
     </div>
     <div class="row-right">
       {% set _base = base_prefix or "/auditor" %}
@@ -12,7 +12,7 @@
       {% if show_org_selector is not defined or show_org_selector %}
         <form method="get" action="{{ _base }}/index-kb" class="header-inline-form {% if org_picker_error %}org-picker--error{% endif %}">
           <label style="margin:0">Организация</label>
-          <select name="org_id" onchange="this.form.submit()" data-org-autocomplete="1" data-auto-submit="1" data-placeholder="Поиск организации…">
+          <select name="org_id" onchange="this.form.submit()" data-org-autocomplete="1" data-auto-submit="1" data-placeholder="">
             <option value="" {% if not selected_org_id %}selected{% endif %}></option>
             {% for o in orgs %}
               <option value="{{ o.id }}" {% if o.id == selected_org_id %}selected{% endif %}>{{ o.name }}</option>
@@ -29,7 +29,7 @@
   {% if error %}
     <div class="card">
       <div class="error">{{ error }}</div>
-      <div class="hint">Ожидаем файл по пути: <span class="mono">{{ template_path }}</span> (монтируется из <span class="mono">docs/</span>).</div>
+      <div class="hint">Проверьте, что применены миграции Alembic (включая seed‑миграции шаблонов Индекса КБ).</div>
     </div>
   {% else %}
     <div class="card">
@@ -37,64 +37,67 @@
         <div>
           <h3 style="margin:0">Выбор формы</h3>
         </div>
-        <div class="muted">Всего листов в Excel: {{ sheet_names|length }}</div>
+        <div class="muted">Доступно форм: {{ sheet_names|length }}</div>
       </div>
 
       <div class="admin-grid indexkb-admin-grid">
-        {% if selected_org_id %}
-          <a class="admin-tile" href="{{ _base }}/index-kb/uib?org_id={{ selected_org_id }}">
-            <div class="admin-tile-icon">
-              <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" focusable="false">
-                <path fill="currentColor" d="M7 2h10v2H7V2zm-2 4h14v16H5V6zm3 3h8v2H8V9zm0 4h8v2H8v-2zm0 4h6v2H8v-2z"/>
-              </svg>
-            </div>
-            <div>
-              <div class="admin-tile-title">Управление ИБ</div>
-            </div>
-          </a>
-        {% else %}
-          <div class="admin-tile admin-tile--disabled" aria-disabled="true" title="Выберите организацию">
-            <div class="admin-tile-icon">
-              <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" focusable="false">
-                <path fill="currentColor" d="M7 2h10v2H7V2zm-2 4h14v16H5V6zm3 3h8v2H8V9zm0 4h8v2H8v-2zm0 4h6v2H8v-2z"/>
-              </svg>
-            </div>
-            <div>
-              <div class="admin-tile-title">Управление ИБ</div>
-              <div class="admin-tile-desc">Выберите организацию</div>
-            </div>
-          </div>
-        {% endif %}
-
-        {% if selected_org_id %}
-          <a class="admin-tile" href="{{ _base }}/index-kb/szi?org_id={{ selected_org_id }}">
-            <div class="admin-tile-icon">
-              <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" focusable="false">
-                <path fill="currentColor" d="M6 2h9l3 3v17H6V2zm8 1v4h4"/>
-                <path fill="currentColor" d="M8 10h8v2H8v-2zm0 4h8v2H8v-2z"/>
-              </svg>
-            </div>
-            <div>
-              <div class="admin-tile-title">СЗИ</div>
-            </div>
-          </a>
-        {% else %}
-          <div class="admin-tile admin-tile--disabled" aria-disabled="true" title="Выберите организацию">
-            <div class="admin-tile-icon">
-              <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" focusable="false">
-                <path fill="currentColor" d="M6 2h9l3 3v17H6V2zm8 1v4h4"/>
-                <path fill="currentColor" d="M8 10h8v2H8v-2zm0 4h8v2H8v-2z"/>
-              </svg>
-            </div>
-            <div>
-              <div class="admin-tile-title">СЗИ</div>
-              <div class="admin-tile-desc">Выберите организацию</div>
-            </div>
-          </div>
-        {% endif %}
-
+        {% set _avail = available_sheets or [] %}
         {% for s in sheet_names %}
-          {% if s != "Управление ИБ" and s != "СЗИ" %}
+          {% if s == "Управление ИБ" %}
+            {% if selected_org_id and (s in _avail) %}
+              <a class="admin-tile" href="{{ _base }}/index-kb/uib?org_id={{ selected_org_id }}">
+                <div class="admin-tile-icon">
+                  <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" focusable="false">
+                    <path fill="currentColor" d="M7 2h10v2H7V2zm-2 4h14v16H5V6zm3 3h8v2H8V9zm0 4h8v2H8v-2zm0 4h6v2H8v-2z"/>
+                  </svg>
+                </div>
+                <div>
+                  <div class="admin-tile-title">Управление ИБ</div>
+                  <div class="admin-tile-desc">Автозаполнение КБ1/КБ2/КБ3 по статусу артефактов + ручной ввод.</div>
+                </div>
+              </a>
+            {% else %}
+              <div class="admin-tile admin-tile--disabled" aria-disabled="true" title="{% if not selected_org_id %}Выберите организацию{% else %}Шаблон не загружен{% endif %}">
+                <div class="admin-tile-icon">
+                  <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" focusable="false">
+                    <path fill="currentColor" d="M7 2h10v2H7V2zm-2 4h14v16H5V6zm3 3h8v2H8V9zm0 4h8v2H8v-2zm0 4h6v2H8v-2z"/>
+                  </svg>
+                </div>
+                <div>
+                  <div class="admin-tile-title">Управление ИБ</div>
+                  <div class="admin-tile-desc">{% if not selected_org_id %}Выберите организацию{% else %}Шаблон не загружен{% endif %}</div>
+                </div>
+              </div>
+            {% endif %}
+          {% elif s == "СЗИ" %}
+            {% if selected_org_id and (s in _avail) %}
+              <a class="admin-tile" href="{{ _base }}/index-kb/szi?org_id={{ selected_org_id }}">
+                <div class="admin-tile-icon">
+                  <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" focusable="false">
+                    <path fill="currentColor" d="M6 2h9l3 3v17H6V2zm8 1v4h4"/>
+                    <path fill="currentColor" d="M8 10h8v2H8v-2zm0 4h8v2H8v-2z"/>
+                  </svg>
+                </div>
+                <div>
+                  <div class="admin-tile-title">СЗИ</div>
+                  <div class="admin-tile-desc">Автозаполнение по статусу «проаудировано» + ручной ввод.</div>
+                </div>
+              </a>
+            {% else %}
+              <div class="admin-tile admin-tile--disabled" aria-disabled="true" title="{% if not selected_org_id %}Выберите организацию{% else %}Шаблон не загружен{% endif %}">
+                <div class="admin-tile-icon">
+                  <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" focusable="false">
+                    <path fill="currentColor" d="M6 2h9l3 3v17H6V2zm8 1v4h4"/>
+                    <path fill="currentColor" d="M8 10h8v2H8v-2zm0 4h8v2H8v-2z"/>
+                  </svg>
+                </div>
+                <div>
+                  <div class="admin-tile-title">СЗИ</div>
+                  <div class="admin-tile-desc">{% if not selected_org_id %}Выберите организацию{% else %}Шаблон не загружен{% endif %}</div>
+                </div>
+              </div>
+            {% endif %}
+          {% else %}
             <div class="admin-tile admin-tile--disabled" aria-disabled="true" title="В разработке">
               <div class="admin-tile-icon">
                 <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" focusable="false">

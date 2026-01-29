@@ -528,11 +528,8 @@ def build_szi_view(db: Session, *, org_id: int, template_path: str, actor: User)
 
     tpl = get_szi_template_from_db(db)
     if not tpl:
-        # In dev we can lazily import from xlsx once; in prod prefer explicit CLI load.
-        ensure_szi_template_loaded(db, template_path=template_path, force=False)
-        tpl = get_szi_template_from_db(db)
-    if not tpl:
-        raise RuntimeError("Шаблон СЗИ не загружен в БД")
+        # Important: do NOT parse Excel on first request. Seed must be done via Alembic migration.
+        raise RuntimeError("Шаблон СЗИ не загружен в БД (нужна seed-миграция)")
     short_names = [r.short_name for r in tpl.rows if r.kind == "item" and r.short_name]
 
     # Small TTL cache for auto scores (audited==current) for snappy UI.

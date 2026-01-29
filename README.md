@@ -54,6 +54,12 @@
 - Docker Desktop (Linux engine / WSL2)
 - свободный порт **8000** (UI) и **5432** (Postgres)
 
+### Дефолтные учётки (dev)
+После первого запуска автоматически создаются:
+- **admin**: логин/пароль берутся из `docker-compose.yml` (`ADMIN_LOGIN`/`ADMIN_PASSWORD`), по умолчанию `admin / admin12345`
+- **auditor**: `auditor / auditor12345`
+- **customer**: `customer / customer12345` (привязан к организации **«Демо организация»**, чтобы была доступна в “Индекс КБ”)
+
 ### 1) Поднять сервисы
 В корне проекта:
 
@@ -70,6 +76,14 @@ docker compose up -d --build
 docker compose down
 ```
 
+### 3) Полностью сбросить БД (чистый старт)
+Так как Postgres хранит данные в именованном docker volume, чтобы удалить все записи:
+
+```bash
+docker compose down -v
+docker compose up -d --build
+```
+
 ## Конфигурация (env)
 Основные переменные (см. `env.example` и `docker-compose.yml`):
 - **`DATABASE_URL`**: строка подключения SQLAlchemy (по умолчанию Postgres в compose)
@@ -79,7 +93,7 @@ docker compose down
 - **`INDEX_KB_TEMPLATE_PATH`**: путь к эталонному xlsx‑шаблону отчёта (в compose монтируется из `./docs`)
 
 Файлы/тома в `docker-compose.yml`:
-- `./data/postgres` → данные Postgres
+- `db_data` (docker volume) → данные Postgres
 - `./docs` → эталонный шаблон Индекса КБ
 - `./data/share` → “шара”/локальная папка (MVP‑инструменты миграции/импорта).
 

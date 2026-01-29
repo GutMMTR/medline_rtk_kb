@@ -69,11 +69,21 @@
       <form method="post" action="/admin/integrations/nextcloud/discover" style="display:inline" data-action-label="Поиск организаций в облаке">
         <button class="btn btn-secondary" type="submit" data-loading-text="Ищу…">Обнаружить организации</button>
       </form>
-      <form method="post" action="/admin/integrations/nextcloud/sync" style="display:inline" data-action-label="Синхронизация" onsubmit="return confirm('Запустить синхронизацию?')">
-        <button class="btn" type="submit" data-loading-text="Синхронизирую…">Синхронизировать сейчас</button>
+      <form method="post" action="/admin/integrations/nextcloud/sync" style="display:inline" data-action-label="Синхронизация (резервная)" onsubmit="return confirm('Запустить синхронизацию (резервную)?')">
+        <button
+          class="btn btn-secondary"
+          type="submit"
+          data-loading-text="Синхронизирую…"
+          title="V1 (резервная): ROOT/<Организация>/ВССТ/КМНК/1/<файл> → short_name=ВССТ.КМНК.1"
+        >Синхронизация</button>
       </form>
-      <form method="post" action="/admin/integrations/nextcloud/sync-v2" style="display:inline" data-action-label="Синхронизация (03 Артефакты)" onsubmit="return confirm('Запустить синхронизацию (03 Артефакты)?')">
-        <button class="btn btn-accent" type="submit" data-loading-text="Синхронизирую…">Синхронизация (03 Артефакты)</button>
+      <form method="post" action="/admin/integrations/nextcloud/sync-v2" style="display:inline; margin-left:auto" data-action-label="Синхронизация (03 Артефакты)" onsubmit="return confirm('Запустить синхронизацию (03 Артефакты)?')">
+        <button
+          class="btn btn-accent"
+          type="submit"
+          data-loading-text="Синхронизирую…"
+          title="V2 (рекомендуется): ROOT/<Организация>/03 Артефакты/<категория>/[любые_папки]/<SHORT.NAME или prefix>/<файлы>. Пример: ROOT/Тестовая организация 3/03 Артефакты/06 Управление ИБ/СУИБ.УРЗ/<файл> → short_name=СУИБ.УРЗ"
+        >Синхронизация (03 Артефакты)</button>
       </form>
     </div>
     {% if discovered_orgs %}
