@@ -11,6 +11,7 @@
 - [Интеграция с Nextcloud](#интеграция-с-nextcloud)
 - [Индекс КБ](#индекс-кб)
 - [Схема БД (обзор)](#схема-бд-обзор)
+- [Схема БД (детально)](#схема-бд-детально)
 - [Миграции](#миграции)
 - [Диагностика и частые проблемы](#диагностика-и-частые-проблемы)
 
@@ -189,6 +190,141 @@ UI:
 ### Прочее
 - **`audit_log`**: аудит‑события (импорт/изменения и т.п.)
 - **`stored_files`**: ранняя “упрощённая” модель хранения файлов (исторически).
+
+## Схема БД (детально)
+Это “рабочее” описание схемы, чтобы быстрее ориентироваться в данных и интеграциях. Источник истины — модели SQLAlchemy: `backend/app/db/models.py`.
+
+### ER‑диаграмма (основные связи)
+
+```mermaid
+erDiagram
+  ORGANIZATIONS ||--o{ USER_ORG_MEMBERSHIPS : has
+  USERS         ||--o{ USER_ORG_MEMBERSHIPS : has
+
+  ARTIFACT_NODES ||--|| ARTIFACTS : owns
+
+  ORGANIZATIONS ||--o{ ORG_ARTIFACTS : has
+  ARTIFACTS     ||--o{ ORG_ARTIFACTS : used_in
+
+  ORG_ARTIFACTS ||--o{ FILE_VERSIONS : versions
+  ORG_ARTIFACTS ||--o{ ORG_ARTIFACT_COMMENTS : comments
+
+  ORGANIZATIONS ||--o{ NEXTCLOUD_REMOTE_FILE_STATE : tracks
+  ORG_ARTIFACTS ||--o{ NEXTCLOUD_REMOTE_FILE_STATE : tracks
+  FILE_VERSIONS ||--o{ FILE_PREVIEWS : previews
+
+  ORGANIZATIONS ||--o{ INDEX_KB_MANUAL_VALUES : manual_values
+  INDEX_KB_TEMPLATE_ROWS ||--o{ INDEX_KB_MANUAL_VALUES : keyed_by_row
+
+  USERS ||--o{ AUDIT_LOG : actor
+  ORGANIZATIONS ||--o{ AUDIT_LOG : org
+```
+
+### Пользователи и доступы
+- **`organizations`**
+  - **`id`**: PK
+  - **`name`**: уникальное имя организации (видно в UI)
+  - **`created_at`**
+  - **`created_by_user_id`**: кто создал вручную (nullable)
+  - **`created_via`**: `manual|nextcloud|system` (для UI/диагностики)
+- **`users`**
+  - **`login`**: уникален
+  - **`password_hash`**: bcrypt‑хеш
+  - **`full_name`**
+  - **`is_active`**: блокировка входа
+  - **`is_admin`**: глобальный админ
+  - **`created_at`**
+- **`user_org_memberships`**
+  - **`user_id`** → `users.id`
+  - **`org_id`** → `organizations.id`
+  - **`role`**: `admin|auditor|customer`
+  - **`created_at`**
+  - уникальность: `(user_id, org_id)`
+
+### Справочник артефактов (референсные данные)
+- **`artifact_nodes`**: дерево папок/узлов
+  - **`id`**: PK
+  - **`parent_id`** → `artifact_nodes.id`
+  - **`segment`**: “кусок” пути
+  - **`full_path`**: уникальный путь через точки (напр. `Восстановление.Планирование...`)
+  - **`sort_order`**
+  - **`created_at`**
+- **`artifacts`**: один артефакт на один `artifact_nodes`
+  - **`id`**: PK
+  - **`node_id`** → `artifact_nodes.id` (уникален)
+  - **`artifact_key`**: уникальный ключ (nullable)
+  - **`topic`**, **`domain`**, **`kb_level`**
+  - **`indicator_name`**
+  - **`short_name`**: ключ “папочной” структуры в UI/Nextcloud (`ВССТ.КМНК.1`)
+  - **`achievement_text`**, **`achievement_item_no`**, **`achievement_item_text`**
+  - **`title`**, **`description`**
+  - **`created_at`**
+
+### Артефакты организации, файлы и аудит
+- **`org_artifacts`**: связь “организация ↔ артефакт”
+  - **`org_id`** → `organizations.id`
+  - **`artifact_id`** → `artifacts.id`
+  - **`status`**: `missing|uploaded`
+  - **`current_file_version_id`** → `file_versions.id` (nullable)
+  - аудит проверки:
+    - **`audited_file_version_id`** → `file_versions.id` (nullable)
+    - **`audited_at`** (nullable)
+    - **`audited_by_user_id`** → `users.id` (nullable)
+  - изменения:
+    - **`created_at`**, **`updated_at`**
+    - **`updated_by_user_id`** → `users.id` (nullable)
+  - уникальность: `(org_id, artifact_id)`
+- **`file_versions`**: версии файла по `org_artifact`
+  - **`org_artifact_id`** → `org_artifacts.id`
+  - **`version_no`**: номер версии (уникален в рамках `org_artifact_id`)
+  - **`original_filename`**, **`content_type`**, **`size_bytes`**, **`sha256`**
+  - **`storage_backend`**: в MVP `postgres`
+  - **`storage_key`**: строковый ключ (nullable, используется для Nextcloud метки)
+  - **`blob`**: байты (nullable)
+  - **`created_at`**, **`created_by_user_id`** → `users.id` (nullable)
+- **`file_previews`**: кеш превью (например, PDF из office)
+  - **`file_version_id`** → `file_versions.id` (уникален)
+  - **`preview_mime`**, **`preview_size_bytes`**, **`preview_sha256`**, **`preview_blob`**
+  - **`last_error`**, **`last_error_at`**
+- **`org_artifact_comments`**: комментарии аудитора
+  - **`org_id`** → `organizations.id`
+  - **`org_artifact_id`** → `org_artifacts.id`
+  - **`author_user_id`** → `users.id` (nullable)
+  - **`comment_text`**, **`created_at`**
+- **`audit_log`**: журнал событий (кто/что/когда поменял)
+  - **`at`**, **`actor_user_id`**, **`org_id`**
+  - **`action`**, **`entity_type`**, **`entity_id`**
+  - **`before_json`**, **`after_json`** (JSONB)
+  - **`ip`**, **`user_agent`**
+
+### Nextcloud (WebDAV)
+- **`nextcloud_integration_settings`**: текущие настройки интеграции
+  - **`is_enabled`**
+  - **`base_url`**, **`username`**, **`password`** (MVP: хранится в БД)
+  - **`root_folder`**
+  - **`create_orgs`**
+  - **`last_sync_at`**, **`last_error`**
+- **`nextcloud_remote_file_state`**: идемпотентность синхронизации
+  - **`org_id`** → `organizations.id`
+  - **`org_artifact_id`** → `org_artifacts.id`
+  - **`remote_path`**: уникален в рамках организации
+  - **`etag`**, **`size_bytes`**
+  - **`imported_file_version_id`** → `file_versions.id` (nullable)
+  - **`imported_at`**
+
+### Индекс КБ (шаблон в БД + ручные значения)
+- **`index_kb_template_rows`**: структура строк по листам (группы/пункты)
+  - **`sheet_name`**, **`sort_order`**
+  - **`kind`**: `group|item`
+  - **`row_key`**: стабильный идентификатор строки
+  - **`title`**, **`short_name`**, **`group_code`**
+  - уникальность: `(sheet_name, row_key)`
+- **`index_kb_manual_values`**: ручные значения (на организацию)
+  - **`org_id`** → `organizations.id`
+  - **`sheet_name`**, **`row_key`**
+  - **`value`** (0..5, может быть дробным)
+  - **`updated_at`**, **`updated_by_user_id`** → `users.id` (nullable)
+  - уникальность: `(org_id, sheet_name, row_key)`
 
 ## Миграции
 Используется Alembic. При старте контейнера `backend` автоматически выполняется:
