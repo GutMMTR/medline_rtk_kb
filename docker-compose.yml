@@ -29,7 +29,6 @@ services:
       ADMIN_FULL_NAME: Default Admin
       MAX_UPLOAD_MB: "50"
       SHARE_PATH: /mnt/share
-      INDEX_KB_TEMPLATE_PATH: /mnt/docs/Эталон_ИндексКБ_шаб.xlsx
     ports:
       - "8000:8000"
     depends_on:
@@ -38,8 +37,6 @@ services:
     volumes:
       # MVP: сюда можно примонтировать SMB шару (read-only) или локальную папку для миграции.
       - ./data/share:/mnt/share:ro
-      # Индекс КБ (эталонный шаблон отчёта)
-      - ./docs:/mnt/docs:ro
 
 volumes:
   db_data:

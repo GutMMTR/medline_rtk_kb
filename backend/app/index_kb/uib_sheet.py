@@ -320,7 +320,7 @@ def compute_uib_summary(rows: list[UibRowView]) -> list[UibSummaryRow]:
     return out
 
 
-def build_uib_view(db: Session, *, org_id: int, template_path: str, actor: User) -> tuple[Organization, UibTemplate, list[UibRowView]]:
+def build_uib_view(db: Session, *, org_id: int, actor: User) -> tuple[Organization, UibTemplate, list[UibRowView]]:
     org = db.get(Organization, org_id)
     if not org:
         raise RuntimeError("Организация не найдена")

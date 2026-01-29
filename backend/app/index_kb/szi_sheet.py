@@ -521,7 +521,7 @@ def compute_szi_summary(rows: list[SziRowView]) -> list[SziSummaryRow]:
     return out
 
 
-def build_szi_view(db: Session, *, org_id: int, template_path: str, actor: User) -> tuple[Organization, SziTemplate, list[SziRowView]]:
+def build_szi_view(db: Session, *, org_id: int, actor: User) -> tuple[Organization, SziTemplate, list[SziRowView]]:
     org = db.get(Organization, org_id)
     if not org:
         raise RuntimeError("Организация не найдена")

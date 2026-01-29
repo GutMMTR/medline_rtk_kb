@@ -43,7 +43,7 @@
   {% if error %}
     <div class="card">
       <div class="error">{{ error }}</div>
-      <div class="hint">Ожидаем файл по пути: <span class="mono">{{ template_path }}</span> (монтируется из <span class="mono">docs/</span>).</div>
+      <div class="hint">Шаблон формы хранится в БД и должен быть загружен seed‑миграциями Alembic.</div>
     </div>
   {% elif selected_org_id %}
     <div class="card">

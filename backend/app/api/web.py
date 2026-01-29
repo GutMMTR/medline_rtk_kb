@@ -789,8 +789,7 @@ def my_index_kb_uib_page(
         return resp
 
     selected_org_id = org.id
-    template_path = settings.index_kb_template_path
-    if not get_uib_template_from_db(db) and (not template_path or not os.path.exists(template_path)):
+    if not get_uib_template_from_db(db):
         resp = templates.TemplateResponse(
             "auditor_index_kb_uib.html",
             {
@@ -799,7 +798,6 @@ def my_index_kb_uib_page(
                 "container_class": "container-wide",
                 "orgs": orgs,
                 "selected_org_id": selected_org_id,
-                "template_path": template_path,
                 "error": "Шаблон УИБ не загружен в БД.",
                 "rows": [],
                 "summary_rows": [],
@@ -817,7 +815,7 @@ def my_index_kb_uib_page(
         resp.headers["Pragma"] = "no-cache"
         return resp
 
-    org_obj, tpl, rows = build_uib_view(db, org_id=selected_org_id, template_path=template_path, actor=user)
+    org_obj, tpl, rows = build_uib_view(db, org_id=selected_org_id, actor=user)
     from app.index_kb.uib_sheet import compute_uib_summary
 
     summary_rows = compute_uib_summary(rows)
@@ -1459,10 +1457,25 @@ def auditor_artifacts_export_xlsx(
         db,
         actor=user,
         org_id=org_id,
-        action="export_xlsx",
-        entity_type="org",
+        action="org_artifacts_export_xlsx",
+        entity_type="org_artifacts",
         entity_id=str(org_id),
-        after={"filename": filename_utf8, "filename_ascii": filename_ascii},
+        after={
+            "filename": filename_utf8,
+            "filename_ascii": filename_ascii,
+            "format": "xlsx",
+            "endpoint": "/auditor/artifacts/export.xlsx",
+            "filters": {
+                "topic": topic,
+                "domain": domain,
+                "indicator": indicator,
+                "kb_level": kb_level,
+                "short_name": short_name,
+                "q": q,
+                "status": status,
+                "audit_status": audit_status,
+            },
+        },
         request=request,
     )
     db.commit()
@@ -1806,8 +1819,6 @@ def auditor_index_kb_uib_page(
     else:
         org_picker_error = True
 
-    template_path = settings.index_kb_template_path
-
     # Cache full view for snappy reloads. Keyed by (org_id, template_rev).
     global _UIB_VIEW_CACHE
     try:
@@ -1819,8 +1830,7 @@ def auditor_index_kb_uib_page(
     summary_rows: list[object] = []
     org = None
     if selected_org_id:
-        # If template is not loaded in DB and we have no xlsx path, show a clear error.
-        if not get_uib_template_from_db(db) and (not template_path or not os.path.exists(template_path)):
+        if not get_uib_template_from_db(db):
             resp = templates.TemplateResponse(
                 "auditor_index_kb_uib.html",
                 {
@@ -1829,7 +1839,6 @@ def auditor_index_kb_uib_page(
                     "container_class": "container-wide",
                     "orgs": orgs,
                     "selected_org_id": selected_org_id,
-                    "template_path": template_path,
                     "error": "Шаблон УИБ не загружен в БД. Проверьте, что применены миграции Alembic (в т.ч. seed-миграция).",
                     "rows": [],
                     "summary_rows": [],
@@ -1855,7 +1864,7 @@ def auditor_index_kb_uib_page(
         if cached and (now - float(cached[0])) < 20.0:
             org, rows, summary_rows = cached[1], cached[2], cached[3]
         else:
-            org, tpl, rows = build_uib_view(db, org_id=selected_org_id, template_path=template_path, actor=user)
+            org, tpl, rows = build_uib_view(db, org_id=selected_org_id, actor=user)
             from app.index_kb.uib_sheet import compute_uib_summary
 
             summary_rows = compute_uib_summary(rows)
@@ -2018,11 +2027,10 @@ def auditor_index_kb_uib_export_xlsx(
     if not org_id:
         raise HTTPException(status_code=400, detail="org_id обязателен")
     _require_auditor_or_admin_for_org(db, user, org_id)
-    template_path = settings.index_kb_template_path
-    if not get_uib_template_from_db(db) and (not template_path or not os.path.exists(template_path)):
+    if not get_uib_template_from_db(db):
         raise HTTPException(status_code=400, detail="Шаблон УИБ не загружен в БД (нужна seed-миграция).")
 
-    org, tpl, rows = build_uib_view(db, org_id=org_id, template_path=template_path, actor=user)
+    org, tpl, rows = build_uib_view(db, org_id=org_id, actor=user)
     from app.index_kb.uib_sheet import compute_uib_summary
 
     summary_rows = compute_uib_summary(rows)
@@ -2031,6 +2039,18 @@ def auditor_index_kb_uib_export_xlsx(
     date_str = datetime.utcnow().date().isoformat()
     filename_utf8 = f"uib_{org.name}_{date_str}.xlsx"
     cd = _download_content_disposition(filename_utf8, fallback_prefix=f"uib_org{org_id}_{date_str}")
+
+    write_audit_log(
+        db,
+        actor=user,
+        org_id=int(org_id),
+        action="index_kb_export_uib_xlsx",
+        entity_type="index_kb",
+        entity_id=f"uib:{int(org_id)}",
+        after={"sheet": UIB_SHEET_NAME, "format": "xlsx", "filename": filename_utf8, "endpoint": "/auditor/index-kb/uib/export.xlsx"},
+        request=request,
+    )
+    db.commit()
     return Response(
         content=content,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -2048,11 +2068,10 @@ def my_index_kb_uib_export_xlsx(
     if not org_id:
         raise HTTPException(status_code=400, detail="org_id обязателен")
     orgs, org = _get_customer_selected_org(db, user, org_id)
-    template_path = settings.index_kb_template_path
-    if not get_uib_template_from_db(db) and (not template_path or not os.path.exists(template_path)):
+    if not get_uib_template_from_db(db):
         raise HTTPException(status_code=400, detail="Шаблон УИБ не загружен в БД (нужна seed-миграция).")
 
-    org_obj, tpl, rows = build_uib_view(db, org_id=org.id, template_path=template_path, actor=user)
+    org_obj, tpl, rows = build_uib_view(db, org_id=org.id, actor=user)
     from app.index_kb.uib_sheet import compute_uib_summary
 
     summary_rows = compute_uib_summary(rows)
@@ -2061,6 +2080,18 @@ def my_index_kb_uib_export_xlsx(
     date_str = datetime.utcnow().date().isoformat()
     filename_utf8 = f"uib_{org_obj.name}_{date_str}.xlsx"
     cd = _download_content_disposition(filename_utf8, fallback_prefix=f"uib_org{org_id}_{date_str}")
+
+    write_audit_log(
+        db,
+        actor=user,
+        org_id=int(org.id),
+        action="index_kb_export_uib_xlsx",
+        entity_type="index_kb",
+        entity_id=f"uib:{int(org.id)}",
+        after={"sheet": UIB_SHEET_NAME, "format": "xlsx", "filename": filename_utf8, "endpoint": "/my/index-kb/uib/export.xlsx"},
+        request=request,
+    )
+    db.commit()
     return Response(
         content=content,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -2093,8 +2124,6 @@ def auditor_index_kb_szi_page(
     else:
         org_picker_error = True
 
-    template_path = settings.index_kb_template_path
-
     # Cache full view for snappy reloads. Keyed by (org_id, template_mtime_ns).
     global _SZI_VIEW_CACHE
     try:
@@ -2108,8 +2137,7 @@ def auditor_index_kb_szi_page(
     items_count = 0
     groups_count = 0
     if selected_org_id:
-        # If template is not loaded in DB and we have no xlsx path, show a clear error.
-        if not get_szi_template_from_db(db) and (not template_path or not os.path.exists(template_path)):
+        if not get_szi_template_from_db(db):
             resp = templates.TemplateResponse(
                 "auditor_index_kb_szi.html",
                 {
@@ -2118,7 +2146,6 @@ def auditor_index_kb_szi_page(
                     "container_class": "container-wide",
                     "orgs": orgs,
                     "selected_org_id": selected_org_id,
-                    "template_path": template_path,
                     "error": "Шаблон СЗИ не загружен в БД. Проверьте, что применены миграции Alembic (в т.ч. seed-миграция).",
                     "rows": [],
                     "summary_rows": [],
@@ -2146,7 +2173,7 @@ def auditor_index_kb_szi_page(
             t_build = 0.0
             t_sum = 0.0
         else:
-            org, tpl, rows = build_szi_view(db, org_id=selected_org_id, template_path=template_path, actor=user)
+            org, tpl, rows = build_szi_view(db, org_id=selected_org_id, actor=user)
             t2 = time.perf_counter()
             from app.index_kb.szi_sheet import compute_szi_summary
 
@@ -2226,11 +2253,10 @@ def auditor_index_kb_szi_export_xlsx(
     if not org_id:
         raise HTTPException(status_code=400, detail="org_id обязателен")
     _require_auditor_or_admin_for_org(db, user, org_id)
-    template_path = settings.index_kb_template_path
-    if not template_path or not os.path.exists(template_path):
-        raise HTTPException(status_code=400, detail="Не найден эталонный шаблон Индекс КБ (.xlsx).")
+    if not get_szi_template_from_db(db):
+        raise HTTPException(status_code=400, detail="Шаблон СЗИ не загружен в БД (нужна seed-миграция).")
 
-    org, tpl, rows = build_szi_view(db, org_id=org_id, template_path=template_path, actor=user)
+    org, tpl, rows = build_szi_view(db, org_id=org_id, actor=user)
     from app.index_kb.szi_sheet import compute_szi_summary
 
     summary_rows = compute_szi_summary(rows)
@@ -2239,6 +2265,18 @@ def auditor_index_kb_szi_export_xlsx(
     date_str = datetime.utcnow().date().isoformat()
     filename_utf8 = f"szi_{org.name}_{date_str}.xlsx"
     cd = _download_content_disposition(filename_utf8, fallback_prefix=f"szi_org{org_id}_{date_str}")
+
+    write_audit_log(
+        db,
+        actor=user,
+        org_id=int(org_id),
+        action="index_kb_export_szi_xlsx",
+        entity_type="index_kb",
+        entity_id=f"szi:{int(org_id)}",
+        after={"sheet": SZI_SHEET_NAME, "format": "xlsx", "filename": filename_utf8, "endpoint": "/auditor/index-kb/szi/export.xlsx"},
+        request=request,
+    )
+    db.commit()
     return Response(
         content=content,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -3335,6 +3373,9 @@ def admin_audit_log_page(
         "audit": "Проверено",
         "import_apply": "Импорт (применить)",
         "export_xlsx": "Экспорт XLSX",
+        "org_artifacts_export_xlsx": "Экспорт Excel (артефакты)",
+        "index_kb_export_uib_xlsx": "Экспорт Excel (Управление ИБ)",
+        "index_kb_export_szi_xlsx": "Экспорт Excel (СЗИ)",
         "nextcloud_import": "Синхронизация Nextcloud",
         "nextcloud_import_v2": "Синхронизация Nextcloud (03 Артефакты)",
         "nextcloud_import_v1": "Синхронизация Nextcloud (v1)",
@@ -3348,6 +3389,8 @@ def admin_audit_log_page(
         "user": "Пользователь",
         "membership": "Роль/доступ",
         "nextcloud_settings": "Настройки Nextcloud",
+        "index_kb": "Индекс КБ",
+        "org_artifacts": "Артефакты (выгрузка)",
         "org": "Организация",
     }
 
