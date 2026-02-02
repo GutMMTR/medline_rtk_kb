@@ -17,18 +17,7 @@
         </div>
       </a>
 
-      <a class="admin-tile" href="/admin/audit-periods">
-        <div class="admin-tile-icon">
-          <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" focusable="false">
-            <path fill="currentColor" d="M7 2h2v2h6V2h2v2h3v18H4V4h3V2zm13 6H4v12h16V8z"/>
-            <path fill="currentColor" d="M8 10h3v3H8v-3zm5 0h3v3h-3v-3z"/>
-          </svg>
-        </div>
-        <div>
-          <div class="admin-tile-title">Периоды аудита</div>
-          <div class="admin-tile-desc">Справочник периодов (30/90/180/365) и настройка просрочки.</div>
-        </div>
-      </a>
+      {# Периоды аудита удалены: используется фильтр по датам загрузки (date_from/date_to) #}
 
       <a class="admin-tile" href="/admin/artifact-levels">
         <div class="admin-tile-icon">
@@ -101,6 +90,18 @@
         <div>
           <div class="admin-tile-title">Индекс КБ</div>
           <div class="admin-tile-desc">Просмотр отчётов по организациям.</div>
+        </div>
+      </a>
+
+      <a class="admin-tile" href="/admin/dashboards">
+        <div class="admin-tile-icon">
+          <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" focusable="false">
+            <path fill="currentColor" d="M4 19h16v2H4v-2zm2-2h2V7H6v10zm5 0h2V3h-2v14zm5 0h2V11h-2v6z"/>
+          </svg>
+        </div>
+        <div>
+          <div class="admin-tile-title">Дашборды</div>
+          <div class="admin-tile-desc">Сводные графики по Индексу КБ (УИБ/СЗИ) и сравнение организаций.</div>
         </div>
       </a>
 

@@ -86,18 +86,19 @@
           <span class="muted filter-meta__nowrap">Уровень: <b>{{ org_level.name }}</b></span>
         {% endif %}
         <label class="muted filter-meta__nowrap filter-meta__label">
-          <span>Период</span>
-          <select name="period_id" onchange="this.form.submit()" style="width: 260px;">
-            {% for p in periods %}
-              <option value="{{ p.id }}" {% if p.id == selected_period_id %}selected{% endif %}>{{ p.name }} ({{ p.date_from|d }} — {{ p.date_to|d }})</option>
-            {% endfor %}
-          </select>
+          <span>Диапазон</span>
+          <input type="date" name="date_from" value="{{ date_from or '' }}" style="width: 160px;" />
+          <span class="muted">—</span>
+          <input type="date" name="date_to" value="{{ date_to or '' }}" style="width: 160px;" />
         </label>
         <label class="filter-meta__label filter-meta__nowrap" style="user-select:none">
           <input type="checkbox" name="in_period" value="1" {% if in_period %}checked{% endif %} onchange="this.form.submit()" />
-          <span>Только загруженные в период</span>
+          <span>Только загруженные в диапазоне</span>
         </label>
       </div>
+      {% if date_range_error %}
+        <div class="muted" style="grid-column: 1 / -1; margin-top: 6px; color: #b91c1c;">{{ date_range_error }}</div>
+      {% endif %}
     </form>
   </div>
 
@@ -173,6 +174,8 @@
               <td class="mono cell-wrap">
                 {% if r.fv_period %}
                   v{{ r.fv_period.version_no }} · {{ r.fv_period.original_filename }}
+                {% elif r.fv %}
+                  v{{ r.fv.version_no }} · {{ r.fv.original_filename }}
                 {% else %}
                   —
                 {% endif %}
@@ -193,7 +196,7 @@
               <td class="td-actions-wide">
                 {% if r.oa.status.value == "uploaded" %}
                   <div class="row-right" style="justify-content:flex-end">
-                    <a class="icon-btn" href="/my/artifacts/{{ r.oa.id }}/download" title="Скачать" aria-label="Скачать">
+                    <a class="icon-btn" href="/my/artifacts/{{ r.oa.id }}/download{% if r.fv_period %}?fv_id={{ r.fv_period.id }}{% elif r.fv %}?fv_id={{ r.fv.id }}{% endif %}" title="Скачать" aria-label="Скачать">
                       <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" focusable="false">
                         <path fill="currentColor" d="M5 18v2h14v-2H5zM19 9h-4V3H9v6H5l7 7 7-7z"/>
                       </svg>
@@ -267,7 +270,8 @@
         <input type="hidden" name="short_name" value="{{ short_name or '' }}" />
         <input type="hidden" name="q" value="{{ q or '' }}" />
         <input type="hidden" name="status" value="{{ status or '' }}" />
-        <input type="hidden" name="period_id" value="{{ selected_period_id }}" />
+        <input type="hidden" name="date_from" value="{{ date_from or '' }}" />
+        <input type="hidden" name="date_to" value="{{ date_to or '' }}" />
         {% if in_period %}
           <input type="hidden" name="in_period" value="1" />
         {% endif %}

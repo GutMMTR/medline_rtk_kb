@@ -16,7 +16,6 @@ from app.db.models import (
     Artifact,
     ArtifactLevel,
     ArtifactLevelItem,
-    AuditPeriod,
     FileVersion,
     IndexKbManualValue,
     IndexKbTemplateRow,
@@ -46,7 +45,9 @@ class SziRow:
 class SziRowView:
     row: SziRow
     is_auto: bool
-    value: float | None
+    kb3: float | None
+    kb2: float | None
+    kb1: float | None
     source: str  # group|auto|manual|empty
     updated_at: object | None
     updated_by: str
@@ -422,35 +423,6 @@ def compute_auto_scores(db: Session, org_id: int, short_names: list[str]) -> dic
     raise RuntimeError("use compute_auto_scores_v2()")
 
 
-def _period_bounds_utc(*, date_from: date, date_to: date) -> tuple[datetime, datetime]:
-    start = datetime.combine(date_from, datetime.min.time())
-    end = datetime.combine(date_to, datetime.min.time()) + timedelta(days=1)
-    return start, end
-
-
-def _get_selected_period_bounds(
-    db: Session,
-    *,
-    org: Organization,
-    period_id: int | None,
-) -> tuple[AuditPeriod | None, datetime | None, datetime | None]:
-    pid = int(period_id or 0) or int(getattr(org, "audit_period_id", 0) or 0)
-    if not pid:
-        return None, None, None
-    ap = db.get(AuditPeriod, pid)
-    if not ap:
-        return None, None, None
-    df = getattr(ap, "date_from", None)
-    dt = getattr(ap, "date_to", None)
-    if not df or not dt:
-        return ap, None, None
-    try:
-        start, end = _period_bounds_utc(date_from=df, date_to=dt)
-        return ap, start, end
-    except Exception:
-        return ap, None, None
-
-
 def _allowed_artifact_ids_subquery(db: Session, *, org: Organization):
     level_id = getattr(org, "artifact_level_id", None)
     if not level_id:
@@ -466,13 +438,27 @@ def _allowed_artifact_ids_subquery(db: Session, *, org: Organization):
     )
 
 
+def _allowed_artifact_ids_subquery_for_level_code(db: Session, *, level_code: str):
+    code = (level_code or "").strip().upper()
+    lvl = db.query(ArtifactLevel).filter(ArtifactLevel.code == code).one_or_none()
+    if not lvl:
+        return None
+    return (
+        db.query(ArtifactLevelItem.artifact_id)
+        .join(ArtifactLevel, ArtifactLevel.id == ArtifactLevelItem.level_id)
+        .filter(ArtifactLevel.sort_order <= lvl.sort_order)
+        .subquery()
+    )
+
+
 def compute_auto_scores_v2(
     db: Session,
     *,
     org: Organization,
     short_names: list[str],
-    period_id: int | None,
-) -> tuple[dict[str, float], set[str], set[str]]:
+    range_start: datetime | None,
+    range_end: datetime | None,
+) -> tuple[dict[str, dict[str, float | None]], set[str]]:
     """
     Auto-score:
     - only artifacts within org effective level
@@ -484,96 +470,116 @@ def compute_auto_scores_v2(
         return {}, set(), set()
     sns = sorted({s.upper() for s in short_names if s})
 
-    art_rows = (
-        db.query(Artifact.id, func.upper(Artifact.short_name).label("sn_u"))
+    existing_all = {
+        (sn or "").upper()
+        for (sn,) in db.query(Artifact.short_name)
         .filter(Artifact.short_name != "", func.upper(Artifact.short_name).in_(sns))
+        .distinct()
         .all()
-    )
-    if not art_rows:
-        return {}, set(), set()
-    id_to_sn: dict[int, str] = {int(aid): str(sn_u).upper() for (aid, sn_u) in art_rows if aid and sn_u}
-    existing_all = set(id_to_sn.values())
-    artifact_ids_all = sorted(id_to_sn.keys())
+        if sn
+    }
+    if not existing_all:
+        return {}, set(sns)
+    missing_in_artifacts = set(sns) - set(existing_all)
 
-    allowed_sub = _allowed_artifact_ids_subquery(db, org=org)
-    if allowed_sub is not None:
-        allowed_ids = {
-            int(aid)
-            for (aid,) in db.query(Artifact.id)
-            .filter(Artifact.id.in_(artifact_ids_all), Artifact.id.in_(allowed_sub))
-            .all()
-            if aid
-        }
-    else:
-        allowed_ids = set(artifact_ids_all)
-    artifact_ids = sorted(allowed_ids)
-    existing_allowed = {id_to_sn[i] for i in artifact_ids if i in id_to_sn}
-    excluded = set(existing_all) - set(existing_allowed)
-    if not artifact_ids:
-        return {}, excluded, set()
+    p_start, p_end = range_start, range_end
 
-    _, p_start, p_end = _get_selected_period_bounds(db, org=org, period_id=period_id)
-    if p_start and p_end:
-        sub = (
-            db.query(
-                FileVersion.org_artifact_id.label("oa_id"),
-                func.max(FileVersion.id).label("fv_id"),
+    def _compute_for_level(level_code: str) -> dict[str, float | None]:
+        allowed_sub = _allowed_artifact_ids_subquery_for_level_code(db, level_code=level_code)
+        if allowed_sub is None:
+            return {}
+        base_filters = [OrgArtifact.org_id == int(org.id), OrgArtifact.artifact_id.in_(allowed_sub)]
+        if p_start or p_end:
+            fv_conds = []
+            if p_start:
+                fv_conds.append(FileVersion.created_at >= p_start)
+            if p_end:
+                fv_conds.append(FileVersion.created_at < p_end)
+            sub = (
+                db.query(
+                    FileVersion.org_artifact_id.label("oa_id"),
+                    func.max(FileVersion.id).label("fv_id"),
+                )
+                .filter(*fv_conds)
+                .group_by(FileVersion.org_artifact_id)
+                .subquery()
             )
-            .filter(FileVersion.created_at >= p_start, FileVersion.created_at < p_end)
-            .group_by(FileVersion.org_artifact_id)
-            .subquery()
-        )
-        audited_flag = case(
-            (
-                and_(
-                    sub.c.fv_id.isnot(None),
-                    OrgArtifact.audited_file_version_id.isnot(None),
-                    OrgArtifact.audited_file_version_id == sub.c.fv_id,
-                    OrgArtifact.review_status == OrgArtifactReviewStatus.approved,
-                    OrgArtifact.audited_at.isnot(None),
-                    OrgArtifact.audited_at >= p_start,
-                    OrgArtifact.audited_at < p_end,
+            aud_conds = []
+            if p_start:
+                aud_conds.append(OrgArtifact.audited_at >= p_start)
+            if p_end:
+                aud_conds.append(OrgArtifact.audited_at < p_end)
+            audited_flag = case(
+                (
+                    and_(
+                        sub.c.fv_id.isnot(None),
+                        OrgArtifact.audited_file_version_id.isnot(None),
+                        OrgArtifact.audited_file_version_id == sub.c.fv_id,
+                        OrgArtifact.review_status == OrgArtifactReviewStatus.approved,
+                        OrgArtifact.audited_at.isnot(None),
+                        *aud_conds,
+                    ),
+                    1,
                 ),
-                1,
-            ),
-            else_=0,
-        )
-        rows = (
-            db.query(OrgArtifact.artifact_id.label("aid"), func.min(audited_flag).label("all_audited"))
-            .outerjoin(sub, sub.c.oa_id == OrgArtifact.id)
-            .filter(OrgArtifact.org_id == int(org.id), OrgArtifact.artifact_id.in_(artifact_ids))
-            .group_by(OrgArtifact.artifact_id)
-            .all()
-        )
-    else:
-        audited_flag = case(
-            (
-                and_(
-                    OrgArtifact.current_file_version_id.isnot(None),
-                    OrgArtifact.audited_file_version_id.isnot(None),
-                    OrgArtifact.audited_file_version_id == OrgArtifact.current_file_version_id,
-                    OrgArtifact.review_status == OrgArtifactReviewStatus.approved,
+                else_=0,
+            )
+            rows2 = (
+                db.query(
+                    func.upper(Artifact.short_name).label("sn"),
+                    func.count(Artifact.id).label("cnt"),
+                    func.min(audited_flag).label("all_audited"),
+                )
+                .join(OrgArtifact, OrgArtifact.artifact_id == Artifact.id)
+                .outerjoin(sub, sub.c.oa_id == OrgArtifact.id)
+                .filter(*base_filters)
+                .filter(Artifact.short_name != "", func.upper(Artifact.short_name).in_(sorted(existing_all)))
+                .group_by(func.upper(Artifact.short_name))
+                .all()
+            )
+        else:
+            audited_flag = case(
+                (
+                    and_(
+                        OrgArtifact.current_file_version_id.isnot(None),
+                        OrgArtifact.audited_file_version_id.isnot(None),
+                        OrgArtifact.audited_file_version_id == OrgArtifact.current_file_version_id,
+                        OrgArtifact.review_status == OrgArtifactReviewStatus.approved,
+                    ),
+                    1,
                 ),
-                1,
-            ),
-            else_=0,
-        )
-        rows = (
-            db.query(OrgArtifact.artifact_id.label("aid"), func.min(audited_flag).label("all_audited"))
-            .filter(OrgArtifact.org_id == int(org.id), OrgArtifact.artifact_id.in_(artifact_ids))
-            .group_by(OrgArtifact.artifact_id)
-            .all()
-        )
+                else_=0,
+            )
+            rows2 = (
+                db.query(
+                    func.upper(Artifact.short_name).label("sn"),
+                    func.count(Artifact.id).label("cnt"),
+                    func.min(audited_flag).label("all_audited"),
+                )
+                .join(OrgArtifact, OrgArtifact.artifact_id == Artifact.id)
+                .filter(*base_filters)
+                .filter(Artifact.short_name != "", func.upper(Artifact.short_name).in_(sorted(existing_all)))
+                .group_by(func.upper(Artifact.short_name))
+                .all()
+            )
+        existing_lvl: set[str] = set()
+        out_lvl: dict[str, float | None] = {}
+        for sn_u, cnt, all_audited in rows2:
+            sn2 = str(sn_u).upper()
+            if int(cnt or 0) <= 0:
+                continue
+            existing_lvl.add(sn2)
+            out_lvl[sn2] = 5.0 if int(all_audited or 0) == 1 else 0.0
+        for sn2 in existing_all:
+            out_lvl.setdefault(sn2, None if sn2 not in existing_lvl else 0.0)
+        return out_lvl
 
-    out: dict[str, float] = {}
-    for aid, all_audited in rows:
-        sn_u = id_to_sn.get(int(aid or 0))
-        if not sn_u:
-            continue
-        out[sn_u] = 5.0 if int(all_audited or 0) == 1 else 0.0
-    for sn_u in existing_allowed:
-        out.setdefault(sn_u, 0.0)
-    return out, excluded, set(existing_allowed)
+    v1 = _compute_for_level("L1")
+    v2 = _compute_for_level("L2")
+    v3 = _compute_for_level("L3")
+    out: dict[str, dict[str, float | None]] = {}
+    for sn2 in existing_all:
+        out[sn2] = {"kb1": v1.get(sn2), "kb2": v2.get(sn2), "kb3": v3.get(sn2)}
+    return out, missing_in_artifacts
 
 
 def load_manual_values(db: Session, org_id: int, sheet_name: str) -> dict[str, IndexKbManualValue]:
@@ -608,25 +614,31 @@ def compute_szi_summary(rows: list[SziRowView]) -> list[SziSummaryRow]:
     out: list[SziSummaryRow] = []
     cur_group_title = ""
     cur_group_code = ""
-    acc: list[float] = []
+    acc1: list[float] = []
+    acc2: list[float] = []
+    acc3: list[float] = []
 
     def flush() -> None:
-        nonlocal acc, cur_group_title, cur_group_code
+        nonlocal acc1, acc2, acc3, cur_group_title, cur_group_code
         if not cur_group_code:
             return
-        m = _mean(acc)
+        m1 = _mean(acc1)
+        m2 = _mean(acc2)
+        m3 = _mean(acc3)
         out.append(
             SziSummaryRow(
                 title=cur_group_title,
                 short_name=cur_group_code,
-                kb3=m,
-                kb2=m,
-                kb1=m,
-                calc_2025=m,
-                current=m,
+                kb3=m3,
+                kb2=m2,
+                kb1=m1,
+                calc_2025=m3,
+                current=m3,
             )
         )
-        acc = []
+        acc1 = []
+        acc2 = []
+        acc3 = []
 
     for rv in rows:
         if rv.row.kind == "group":
@@ -634,9 +646,12 @@ def compute_szi_summary(rows: list[SziRowView]) -> list[SziSummaryRow]:
             cur_group_title = rv.row.title
             cur_group_code = rv.row.short_name
             continue
-        if rv.value is None:
-            continue
-        acc.append(float(rv.value))
+        if rv.kb1 is not None:
+            acc1.append(float(rv.kb1))
+        if rv.kb2 is not None:
+            acc2.append(float(rv.kb2))
+        if rv.kb3 is not None:
+            acc3.append(float(rv.kb3))
     flush()
     return out
 
@@ -646,7 +661,8 @@ def build_szi_view(
     *,
     org_id: int,
     actor: User,
-    period_id: int | None = None,
+    range_start: datetime | None = None,
+    range_end: datetime | None = None,
 ) -> tuple[Organization, SziTemplate, list[SziRowView]]:
     org = db.get(Organization, org_id)
     if not org:
@@ -665,38 +681,30 @@ def build_szi_view(
         _SZI_AUTO_CACHE
     except NameError:
         _SZI_AUTO_CACHE = {}  # type: ignore[var-annotated]
-    cache_key = (int(org_id), int(tpl.mtime_ns), int(period_id or 0), int(getattr(org, "audit_period_id", 0) or 0))
+    cache_key = (int(org_id), int(tpl.mtime_ns), (range_start.isoformat() if range_start else ""), (range_end.isoformat() if range_end else ""))
     now = time.time()
     cached = _SZI_AUTO_CACHE.get(cache_key)  # type: ignore[name-defined]
     if cached and (now - float(cached[0])) < 15.0:
-        auto, excluded = cached[1], cached[2]
+        auto, missing_in_artifacts = cached[1], cached[2]
     else:
-        auto, excluded, _existing_allowed = compute_auto_scores_v2(db, org=org, short_names=short_names, period_id=period_id)
-        _SZI_AUTO_CACHE[cache_key] = (now, auto, excluded)  # type: ignore[name-defined]
+        auto, missing_in_artifacts = compute_auto_scores_v2(db, org=org, short_names=short_names, range_start=range_start, range_end=range_end)
+        _SZI_AUTO_CACHE[cache_key] = (now, auto, missing_in_artifacts)  # type: ignore[name-defined]
 
     manual = load_manual_values(db, org_id, SZI_SHEET_NAME)
     # Tokens present on the sheet but missing in Artifact справочнике.
     # We still show them (as before), but mark explicitly.
-    sn_all = {s.upper() for s in short_names if s}
-    sn_have = {k.upper() for k in (auto or {}).keys()}
-    sn_missing_artifact = sn_all - sn_have - set(excluded)
+    sn_missing_artifact = {s.upper() for s in (missing_in_artifacts or set()) if s}
 
     out: list[SziRowView] = []
     for r in tpl.rows:
         if r.kind == "group":
-            out.append(SziRowView(row=r, is_auto=True, value=None, source="group", updated_at=None, updated_by=""))
+            out.append(SziRowView(row=r, is_auto=True, kb3=None, kb2=None, kb1=None, source="group", updated_at=None, updated_by=""))
             continue
         key = r.row_key
         sn_u = r.short_name.upper()
-        if sn_u in excluded:
-            out.append(SziRowView(row=r, is_auto=True, value=None, source="вне уровня", updated_at=None, updated_by=""))
-            continue
-        if sn_u in auto:
-            out.append(SziRowView(row=r, is_auto=True, value=auto[sn_u], source="auto", updated_at=None, updated_by=""))
-            continue
         if sn_u in sn_missing_artifact:
             # Keep UX consistent: row exists, but we can't auto-score since there's no artifact in reference.
-            out.append(SziRowView(row=r, is_auto=False, value=0.0, source="нет артефакта", updated_at=None, updated_by=""))
+            out.append(SziRowView(row=r, is_auto=False, kb3=None, kb2=None, kb1=None, source="нет артефакта", updated_at=None, updated_by=""))
             continue
         mv = manual.get(key)
         if mv:
@@ -704,14 +712,31 @@ def build_szi_view(
                 SziRowView(
                     row=r,
                     is_auto=False,
-                    value=float(mv.value),
+                    kb3=float(mv.value),
+                    kb2=float(mv.value),
+                    kb1=float(mv.value),
                     source="manual",
                     updated_at=mv.updated_at,
                     updated_by=mv.updated_by.login if mv.updated_by else "",
                 )
             )
         else:
-            out.append(SziRowView(row=r, is_auto=False, value=None, source="empty", updated_at=None, updated_by=""))
+            v = auto.get(sn_u) or {}
+            if isinstance(v, dict):
+                out.append(
+                    SziRowView(
+                        row=r,
+                        is_auto=True,
+                        kb3=v.get("kb3"),
+                        kb2=v.get("kb2"),
+                        kb1=v.get("kb1"),
+                        source="auto",
+                        updated_at=None,
+                        updated_by="",
+                    )
+                )
+            else:
+                out.append(SziRowView(row=r, is_auto=False, kb3=None, kb2=None, kb1=None, source="empty", updated_at=None, updated_by=""))
 
     return org, tpl, out
 

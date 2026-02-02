@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import enum
-from datetime import date, datetime
+from datetime import datetime
 
 from sqlalchemy import Boolean, Date, DateTime, Enum, Float, ForeignKey, Integer, LargeBinary, String, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB
@@ -25,18 +25,6 @@ class OrgArtifactReviewStatus(str, enum.Enum):
     pending = "pending"
     approved = "approved"
     needs_correction = "needs_correction"
-
-
-class AuditPeriod(Base):
-    __tablename__ = "audit_periods"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    code: Mapped[str] = mapped_column(String(32), unique=True, nullable=False)
-    name: Mapped[str] = mapped_column(String(255), nullable=False, default="")
-    date_from: Mapped[date] = mapped_column(Date, nullable=False)
-    date_to: Mapped[date] = mapped_column(Date, nullable=False)
-    sort_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0, index=True)
-    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, index=True)
 
 
 class ArtifactLevel(Base):
@@ -79,11 +67,9 @@ class Organization(Base):
     created_by_user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     created_via: Mapped[str] = mapped_column(String(32), nullable=False, default="manual")  # manual|nextcloud|system
 
-    audit_period_id: Mapped[int | None] = mapped_column(ForeignKey("audit_periods.id", ondelete="SET NULL"), nullable=True)
     artifact_level_id: Mapped[int | None] = mapped_column(ForeignKey("artifact_levels.id", ondelete="SET NULL"), nullable=True)
 
     created_by: Mapped["User | None"] = relationship(foreign_keys=[created_by_user_id])
-    audit_period: Mapped["AuditPeriod | None"] = relationship(foreign_keys=[audit_period_id])
     artifact_level: Mapped["ArtifactLevel | None"] = relationship(foreign_keys=[artifact_level_id])
 
 

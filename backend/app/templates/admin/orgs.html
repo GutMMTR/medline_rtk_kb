@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% block container_class %}container-wide{% endblock %}
 {% block content %}
   <div class="section-header">
     <div>
@@ -46,6 +47,7 @@
               Кем создана{% if sort == 'created_by' %} {% if dir == 'asc' %}▲{% else %}▼{% endif %}{% endif %}
             </a>
           </th>
+          <th>Сотрудников</th>
           <th>
             <a class="breadcrumb-link" href="/admin/orgs?{{ base_query }}&page=1&sort=created_at&dir={% if sort == 'created_at' and dir == 'asc' %}desc{% else %}asc{% endif %}">
               Создана{% if sort == 'created_at' %} {% if dir == 'asc' %}▲{% else %}▼{% endif %}{% endif %}
@@ -63,6 +65,11 @@
               </a>
             </td>
             <td class="mono">{{ r.created_by_label }}</td>
+            <td class="mono">
+              <a class="breadcrumb-link" href="/admin/orgs/{{ r.org.id }}/users" title="Открыть пользователей организации">
+                {{ r.members_cnt }}
+              </a>
+            </td>
             <td class="mono">{{ r.org.created_at|dt }}</td>
             <td class="td-actions-wide">
               <div class="row-right">

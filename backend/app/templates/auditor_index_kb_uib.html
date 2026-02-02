@@ -19,18 +19,14 @@
             {% endfor %}
           </select>
 
-          {% if periods is defined and periods and selected_org_id %}
-            <label style="margin:0">Период</label>
-            <select name="period_id" onchange="this.form.submit()" style="width: 280px;">
-              {% for p in periods %}
-                <option value="{{ p.id }}" {% if p.id == selected_period_id %}selected{% endif %}>{{ p.name }} ({{ p.date_from|d }} — {{ p.date_to|d }})</option>
-              {% endfor %}
-            </select>
-          {% endif %}
+          <label style="margin:0">Диапазон</label>
+          <input type="date" name="date_from" value="{{ date_from or '' }}" style="width: 160px;" />
+          <span class="muted">—</span>
+          <input type="date" name="date_to" value="{{ date_to or '' }}" style="width: 160px;" />
         </form>
       {% endif %}
       {% if selected_org_id %}
-        <a class="btn btn-secondary" href="{{ _base }}/index-kb/uib/export.xlsx?org_id={{ selected_org_id }}{% if selected_period_id %}&period_id={{ selected_period_id }}{% endif %}">Выгрузить Excel</a>
+        <a class="btn btn-secondary" href="{{ _base }}/index-kb/uib/export.xlsx?org_id={{ selected_org_id }}{% if date_from %}&date_from={{ date_from }}{% endif %}{% if date_to %}&date_to={{ date_to }}{% endif %}">Выгрузить Excel</a>
         <a class="btn btn-secondary" href="{{ _base }}/index-kb?org_id={{ selected_org_id }}&sheet={{ sheet_name }}" title="Вернуться к основной странице Индекса КБ (Excel-вид)">Индекс КБ</a>
         <a class="btn btn-secondary" href="{{ _art }}?org_id={{ selected_org_id }}">Артефакты</a>
         <a class="btn btn-secondary" href="{{ _files }}?org_id={{ selected_org_id }}">Файлы</a>
@@ -134,25 +130,21 @@
                   </td>
 
                   {% if r.is_auto %}
-                    <td class="kb-cell kb-kb3"><span class="kb-val">{% if r.value is not none %}{{ r.value|int }}{% else %}—{% endif %}</span></td>
-                    <td class="kb-cell kb-kb2"><span class="kb-val">{% if r.value is not none %}{{ r.value|int }}{% else %}—{% endif %}</span></td>
-                    <td class="kb-cell kb-kb1"><span class="kb-val">{% if r.value is not none %}{{ r.value|int }}{% else %}—{% endif %}</span></td>
+                    <td class="kb-cell kb-kb3"><span class="kb-val">{% if r.kb3 is not none %}{{ r.kb3|int }}{% else %}—{% endif %}</span></td>
+                    <td class="kb-cell kb-kb2"><span class="kb-val">{% if r.kb2 is not none %}{{ r.kb2|int }}{% else %}—{% endif %}</span></td>
+                    <td class="kb-cell kb-kb1"><span class="kb-val">{% if r.kb1 is not none %}{{ r.kb1|int }}{% else %}—{% endif %}</span></td>
                     <td class="td-actions">
-                      {% if r.source == "вне уровня" %}
-                        <span class="muted" title="Артефакт не входит в уровень организации — не учитываем">n/a</span>
-                      {% else %}
-                        <span class="muted" title="Заполняется автоматически по статусу артефакта">auto</span>
-                      {% endif %}
+                      <span class="muted" title="КБ1/КБ2/КБ3 считаются по уровням L1/L2/L3">auto</span>
                     </td>
                   {% else %}
                     <td class="kb-cell kb-kb3">
                       {% if readonly %}
-                        <span class="kb-val">{% if r.value is not none %}{{ r.value }}{% else %}—{% endif %}</span>
+                        <span class="kb-val">{% if r.kb3 is not none %}{{ r.kb3 }}{% else %}—{% endif %}</span>
                       {% else %}
                         <form method="post" action="{{ _base }}/index-kb/uib/manual" class="kb-form">
                           <input type="hidden" name="org_id" value="{{ selected_org_id }}" />
                           <input type="hidden" name="row_key" value="{{ r.row.row_key }}" />
-                          <input class="kb-input" name="value" type="number" min="0" max="5" step="0.1" value="{% if r.value is not none %}{{ r.value }}{% endif %}" placeholder="—" />
+                          <input class="kb-input" name="value" type="number" min="0" max="5" step="0.1" value="{% if r.kb3 is not none %}{{ r.kb3 }}{% endif %}" placeholder="—" />
                           <button class="icon-btn" type="submit" title="Сохранить" aria-label="Сохранить">
                             <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" focusable="false">
                               <path fill="currentColor" d="M17 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V7l-4-4zM6 8V5h9v3H6z"/>
@@ -167,8 +159,8 @@
                         {% endif %}
                       {% endif %}
                     </td>
-                    <td class="kb-cell kb-kb2"><span class="kb-val">{% if r.value is not none %}{{ r.value }}{% else %}—{% endif %}</span></td>
-                    <td class="kb-cell kb-kb1"><span class="kb-val">{% if r.value is not none %}{{ r.value }}{% else %}—{% endif %}</span></td>
+                    <td class="kb-cell kb-kb2"><span class="kb-val">{% if r.kb2 is not none %}{{ r.kb2 }}{% else %}—{% endif %}</span></td>
+                    <td class="kb-cell kb-kb1"><span class="kb-val">{% if r.kb1 is not none %}{{ r.kb1 }}{% else %}—{% endif %}</span></td>
                     <td class="td-actions">
                       <span class="muted" title="Нет такого сокращения в справочнике артефактов — ввод вручную">manual</span>
                     </td>

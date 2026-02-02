@@ -3,7 +3,13 @@
   <div class="section-header">
     <div>
       <h2 style="margin:0">Уровень: {{ level.name }}</h2>
-      <div class="muted">Код: <span class="mono">{{ level.code }}</span> · сортировка: {{ level.sort_order }}</div>
+      <div class="muted">
+        Код: <span class="mono">{{ level.code }}</span>
+        {% if level.code == "L1" %}<span class="muted">(КБ1)</span>{% endif %}
+        {% if level.code == "L2" %}<span class="muted">(КБ2)</span>{% endif %}
+        {% if level.code == "L3" %}<span class="muted">(КБ3)</span>{% endif %}
+        · сортировка: {{ level.sort_order }}
+      </div>
     </div>
     <div class="row-right">
       <a class="btn btn-secondary" href="/admin/artifact-levels">Назад</a>

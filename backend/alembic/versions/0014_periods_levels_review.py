@@ -1,4 +1,4 @@
-"""audit periods + artifact levels + review status
+"""artifact levels + review status (no audit periods)
 
 Revision ID: 0014_periods_levels_review
 Revises: 0013_seed_demo_users
@@ -29,20 +29,6 @@ def upgrade() -> None:
     )
     org_artifact_review_status.create(op.get_bind(), checkfirst=True)
 
-    # --- audit periods ---
-    op.create_table(
-        "audit_periods",
-        sa.Column("id", sa.Integer(), primary_key=True),
-        sa.Column("code", sa.String(length=32), nullable=False),
-        sa.Column("name", sa.String(length=255), nullable=False),
-        sa.Column("days", sa.Integer(), nullable=False),
-        sa.Column("sort_order", sa.Integer(), nullable=False, server_default="0"),
-        sa.Column("is_active", sa.Boolean(), nullable=False, server_default=sa.text("TRUE")),
-        sa.UniqueConstraint("code", name="uq_audit_periods_code"),
-    )
-    op.create_index("ix_audit_periods_sort_order", "audit_periods", ["sort_order"], unique=False)
-    op.create_index("ix_audit_periods_is_active", "audit_periods", ["is_active"], unique=False)
-
     # --- artifact levels ---
     op.create_table(
         "artifact_levels",
@@ -67,17 +53,8 @@ def upgrade() -> None:
     op.create_index("ix_artifact_level_items_level_id", "artifact_level_items", ["level_id"], unique=False)
     op.create_index("ix_artifact_level_items_artifact_id", "artifact_level_items", ["artifact_id"], unique=False)
 
-    # --- organizations: add audit_period_id + artifact_level_id ---
-    op.add_column("organizations", sa.Column("audit_period_id", sa.Integer(), nullable=True))
+    # --- organizations: add artifact_level_id ---
     op.add_column("organizations", sa.Column("artifact_level_id", sa.Integer(), nullable=True))
-    op.create_foreign_key(
-        "fk_organizations_audit_period_id",
-        "organizations",
-        "audit_periods",
-        ["audit_period_id"],
-        ["id"],
-        ondelete="SET NULL",
-    )
     op.create_foreign_key(
         "fk_organizations_artifact_level_id",
         "organizations",
@@ -86,7 +63,6 @@ def upgrade() -> None:
         ["id"],
         ondelete="SET NULL",
     )
-    op.create_index("ix_organizations_audit_period_id", "organizations", ["audit_period_id"], unique=False)
     op.create_index("ix_organizations_artifact_level_id", "organizations", ["artifact_level_id"], unique=False)
 
     # --- org_artifacts: add review_status ---
@@ -101,22 +77,7 @@ def upgrade() -> None:
     )
     op.create_index("ix_org_artifacts_review_status", "org_artifacts", ["review_status"], unique=False)
 
-    # --- seed default periods/levels (idempotent) ---
-    op.execute(
-        """
-        INSERT INTO audit_periods (code, name, days, sort_order, is_active)
-        VALUES
-          ('P30',  '30 дней',  30,  30, TRUE),
-          ('P90',  '90 дней',  90,  90, TRUE),
-          ('P180', '180 дней', 180, 180, TRUE),
-          ('P365', '365 дней', 365, 365, TRUE)
-        ON CONFLICT (code) DO UPDATE
-          SET name = EXCLUDED.name,
-              days = EXCLUDED.days,
-              sort_order = EXCLUDED.sort_order,
-              is_active = EXCLUDED.is_active
-        """
-    )
+    # --- seed default levels (idempotent) ---
     op.execute(
         """
         INSERT INTO artifact_levels (code, name, sort_order, color, is_active)
@@ -186,13 +147,6 @@ def upgrade() -> None:
     op.execute(
         """
         UPDATE organizations
-        SET audit_period_id = (SELECT id FROM audit_periods WHERE code='P365' LIMIT 1)
-        WHERE audit_period_id IS NULL
-        """
-    )
-    op.execute(
-        """
-        UPDATE organizations
         SET artifact_level_id = (SELECT id FROM artifact_levels WHERE code='L3' LIMIT 1)
         WHERE artifact_level_id IS NULL
         """
@@ -228,11 +182,8 @@ def downgrade() -> None:
 
     # organizations links
     op.drop_index("ix_organizations_artifact_level_id", table_name="organizations")
-    op.drop_index("ix_organizations_audit_period_id", table_name="organizations")
     op.drop_constraint("fk_organizations_artifact_level_id", "organizations", type_="foreignkey")
-    op.drop_constraint("fk_organizations_audit_period_id", "organizations", type_="foreignkey")
     op.drop_column("organizations", "artifact_level_id")
-    op.drop_column("organizations", "audit_period_id")
 
     # level tables
     op.drop_index("ix_artifact_level_items_artifact_id", table_name="artifact_level_items")
@@ -242,11 +193,6 @@ def downgrade() -> None:
     op.drop_index("ix_artifact_levels_is_active", table_name="artifact_levels")
     op.drop_index("ix_artifact_levels_sort_order", table_name="artifact_levels")
     op.drop_table("artifact_levels")
-
-    # periods
-    op.drop_index("ix_audit_periods_is_active", table_name="audit_periods")
-    op.drop_index("ix_audit_periods_sort_order", table_name="audit_periods")
-    op.drop_table("audit_periods")
 
     # drop enum type
     org_artifact_review_status = sa.Enum(name="org_artifact_review_status")

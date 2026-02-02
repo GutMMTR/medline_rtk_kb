@@ -20,4 +20,6 @@ COPY . /app
 
 EXPOSE 8000
 
+# Всегда применяем миграции до head.
+# Демо-данные управляются переменной SEED_DEMO_DATA внутри миграции (идемпотентно для чистой БД).
 CMD ["sh", "-lc", "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"]

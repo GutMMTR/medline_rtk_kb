@@ -1,0 +1,750 @@
+{% extends "base.html" %}
+{% block content %}
+  <div class="section-header">
+    <div>
+      <h2 style="margin:0">Дашборды · Индекс КБ</h2>
+      <div class="muted">Сводные графики по «Управление ИБ» и «СЗИ». КБ1/КБ2/КБ3 считаются как уровни L1/L2/L3.</div>
+    </div>
+    <div class="row-right">
+      <a class="btn btn-secondary" href="/admin">В админку</a>
+    </div>
+  </div>
+
+  {% if error %}
+    <div class="card"><div class="error">{{ error }}</div></div>
+  {% endif %}
+
+  <div class="card">
+    <h3 style="margin-top:0">Фильтры</h3>
+    <form method="get" action="/admin/dashboards" class="grid filter-form" style="grid-template-columns: 1.2fr 170px 170px 1fr; align-items:start">
+      <div>
+        <label>Организации</label>
+        <div style="position:relative">
+          <input id="org_search" type="text" placeholder="Начните вводить название…" autocomplete="off" />
+          <div id="org_dropdown" class="card" style="display:none; position:absolute; left:0; right:0; top:46px; z-index:50; margin:0; padding:10px; border-style:solid; max-height: 260px; overflow:auto">
+            <div class="muted" style="margin-bottom:6px">Выберите из списка:</div>
+            <div id="org_dropdown_items"></div>
+            <div id="org_dropdown_empty" class="muted" style="display:none">Ничего не найдено.</div>
+          </div>
+        </div>
+        <div class="muted" style="margin-top:6px">Найдите организацию поиском и отметьте галкой. Можно выбрать несколько.</div>
+
+        <div class="card" style="margin:10px 0 0 0; padding:10px; border-style:dashed">
+          <div class="muted" style="margin-bottom:6px">Выбранные:</div>
+          <div id="org_selected" class="row-right" style="justify-content:flex-start; gap:8px; flex-wrap:wrap"></div>
+          <div id="org_selected_empty" class="muted" style="display:none">Пока ничего не выбрано.</div>
+        </div>
+
+        <div id="org_hidden_inputs"></div>
+
+        <noscript>
+          <div class="card" style="margin-top:10px; padding:10px; border-style:dashed">
+            <div class="muted" style="margin-bottom:6px">Без JavaScript:</div>
+            <select name="org_ids" multiple size="8" style="min-height:180px; width:100%">
+              {% for o in orgs %}
+                <option value="{{ o.id }}" {% if o.id in selected_org_ids %}selected{% endif %}>{{ o.name }}</option>
+              {% endfor %}
+            </select>
+          </div>
+        </noscript>
+      </div>
+
+      <div>
+        <label>Диапазон с</label>
+        <input type="date" name="date_from" value="{{ date_from }}" />
+      </div>
+      <div>
+        <label>Диапазон по</label>
+        <input type="date" name="date_to" value="{{ date_to }}" />
+      </div>
+
+      <div>
+        <label>Дашборд</label>
+        <input type="hidden" name="chart" id="chart_input" value="{{ selected_chart }}" />
+
+        <div class="segmented" id="dash_tab">
+          <button type="button" class="seg-btn" data-tab="index">Индекс КБ</button>
+          <button type="button" class="seg-btn" data-tab="statuses">Статусы</button>
+          <button type="button" class="seg-btn" data-tab="files">Файлы</button>
+          <button type="button" class="seg-btn" data-tab="backlog">Бэклог</button>
+        </div>
+
+        <div class="segmented" id="dash_sheet" style="margin-top:10px">
+          <button type="button" class="seg-btn" data-sheet="uib">УИБ</button>
+          <button type="button" class="seg-btn" data-sheet="szi">СЗИ</button>
+        </div>
+
+        <div class="segmented" id="dash_view" style="margin-top:10px">
+          <button type="button" class="seg-btn" data-view="overall">Индекс</button>
+          <button type="button" class="seg-btn" data-view="radar">Радар</button>
+          <button type="button" class="seg-btn" data-view="sections">Разделы</button>
+          <button type="button" class="seg-btn" data-view="breakdown">Срез</button>
+          <button type="button" class="seg-btn" data-view="levels">Уровни</button>
+        </div>
+
+        <div class="muted" style="margin-top:8px">Один график на странице. Переключатели меняют тип графика.</div>
+      </div>
+
+      <div class="filter-meta" style="justify-content:flex-end">
+        <div style="min-width:360px">
+          <label>Детализация (организация)</label>
+          <select id="details_org_id" name="details_org_id" {% if selected_org_ids|length == 0 %}disabled{% endif %}>
+            {% if selected_org_ids|length == 0 %}
+              <option value="">(сначала выберите организацию)</option>
+            {% else %}
+              {% for o in orgs %}
+                {% if o.id in selected_org_ids %}
+                  <option value="{{ o.id }}" {% if o.id == details_org_id %}selected{% endif %}>{{ o.name }}</option>
+                {% endif %}
+              {% endfor %}
+            {% endif %}
+          </select>
+        </div>
+        <label class="filter-meta__label filter-meta__nowrap" id="percent_toggle_wrap" style="margin-top:0; display:none">
+          <input id="percent_toggle" type="checkbox" />
+          <span>Показывать в процентах</span>
+        </label>
+        <button class="btn" type="submit">Построить</button>
+      </div>
+
+      <div style="grid-column: 1 / -1">
+        <details class="dash-advanced" {% if selected_chart in ["statuses_breakdown","statuses_breakdown_uib","statuses_breakdown_szi","levels_statuses","levels_statuses_uib","levels_statuses_szi","uib_section_statuses","szi_section_statuses","backlog_age","backlog_age_uib","backlog_age_szi","uib_radar","szi_radar"] %}open{% endif %}>
+          <summary>Дополнительные фильтры (тематики/домены/срез)</summary>
+          <div class="grid" style="grid-template-columns: 1fr 1fr 160px; gap:12px; margin-top:10px">
+            <div style="grid-column: 1 / -1" class="row-right" style="justify-content:flex-start; gap:14px; flex-wrap:wrap">
+              <label style="display:flex; align-items:center; gap:8px; margin:0">
+                <input type="checkbox" name="dim_topic" value="1" {% if dim_topic %}checked{% endif %} />
+                <span>По тематикам</span>
+              </label>
+              <label style="display:flex; align-items:center; gap:8px; margin:0">
+                <input type="checkbox" name="dim_domain" value="1" {% if dim_domain %}checked{% endif %} />
+                <span>По доменам</span>
+              </label>
+              <div class="muted">Можно включить один или оба.</div>
+            </div>
+
+            <div>
+              <label>Фильтр: тематики</label>
+              <select name="topic" multiple size="6" style="min-height:150px">
+                {% for t in topics %}
+                  <option value="{{ t }}" {% if t in filter_topics %}selected{% endif %}>{{ t }}</option>
+                {% endfor %}
+              </select>
+              <div class="muted" style="margin-top:6px">Если ничего не выбрано — берём все.</div>
+            </div>
+            <div>
+              <label>Фильтр: домены</label>
+              <select name="domain" multiple size="6" style="min-height:150px">
+                {% for d in domains %}
+                  <option value="{{ d }}" {% if d in filter_domains %}selected{% endif %}>{{ d }}</option>
+                {% endfor %}
+              </select>
+              <div class="muted" style="margin-top:6px">Если ничего не выбрано — берём все.</div>
+            </div>
+            <div>
+              <label>Топ N</label>
+              <input type="number" name="top_n" min="5" max="30" value="{{ top_n }}" />
+              <div class="muted" style="margin-top:6px">Для графиков “срез”.</div>
+            </div>
+          </div>
+        </details>
+      </div>
+    </form>
+  </div>
+
+  <script>
+    (function () {
+      const orgList = {{ orgs|map(attribute='id')|list|tojson }}.map((id, i) => ({
+        id: Number(id),
+        name: String({{ orgs|map(attribute='name')|list|tojson }}[i] || '')
+      })).filter(o => Number.isFinite(o.id) && o.id > 0);
+      const initialSelected = new Set({{ selected_org_ids|tojson }}.map(x => Number(x)).filter(x => Number.isFinite(x) && x > 0));
+
+      const $search = document.getElementById('org_search');
+      const $dropdown = document.getElementById('org_dropdown');
+      const $dropdownItems = document.getElementById('org_dropdown_items');
+      const $dropdownEmpty = document.getElementById('org_dropdown_empty');
+      const $selected = document.getElementById('org_selected');
+      const $selectedEmpty = document.getElementById('org_selected_empty');
+      const $hidden = document.getElementById('org_hidden_inputs');
+
+      function escapeHtml(s) {
+        return String(s)
+          .replaceAll('&', '&amp;')
+          .replaceAll('<', '&lt;')
+          .replaceAll('>', '&gt;')
+          .replaceAll('"', '&quot;')
+          .replaceAll("'", '&#039;');
+      }
+
+      function renderSelected() {
+        $selected.innerHTML = '';
+        $hidden.innerHTML = '';
+        const ids = Array.from(initialSelected.values()).sort((a, b) => a - b);
+        if (ids.length === 0) {
+          $selectedEmpty.style.display = '';
+        } else {
+          $selectedEmpty.style.display = 'none';
+        }
+        for (const id of ids) {
+          const org = orgList.find(o => o.id === id);
+          const name = org ? org.name : `ID ${id}`;
+
+          const chip = document.createElement('button');
+          chip.type = 'button';
+          chip.className = 'badge badge-neutral';
+          chip.style.cursor = 'pointer';
+          chip.title = 'Убрать из выбранных';
+          chip.textContent = name + ' ×';
+          chip.addEventListener('click', () => {
+            initialSelected.delete(id);
+            renderSelected();
+            renderDropdown();
+            if (window.__dashScheduleNavigate) window.__dashScheduleNavigate();
+          });
+          $selected.appendChild(chip);
+
+          const inp = document.createElement('input');
+          inp.type = 'hidden';
+          inp.name = 'org_ids';
+          inp.value = String(id);
+          $hidden.appendChild(inp);
+        }
+      }
+
+      function openDropdown() {
+        if ($dropdown) $dropdown.style.display = '';
+      }
+      function closeDropdown() {
+        if ($dropdown) $dropdown.style.display = 'none';
+      }
+
+      function renderDropdown() {
+        const q = ($search.value || '').trim().toLowerCase();
+        let list = orgList;
+        if (q) {
+          list = orgList.filter(o => o.name.toLowerCase().includes(q));
+        }
+        // limit to keep UI snappy
+        list = list.slice(0, 25);
+
+        $dropdownItems.innerHTML = '';
+        if (list.length === 0) {
+          $dropdownEmpty.style.display = '';
+          return;
+        }
+        $dropdownEmpty.style.display = 'none';
+
+        for (const o of list) {
+          const row = document.createElement('label');
+          row.style.display = 'flex';
+          row.style.alignItems = 'center';
+          row.style.gap = '10px';
+          row.style.margin = '6px 0';
+          row.style.cursor = 'pointer';
+
+          const cb = document.createElement('input');
+          cb.type = 'checkbox';
+          cb.checked = initialSelected.has(o.id);
+          cb.addEventListener('change', () => {
+            if (cb.checked) initialSelected.add(o.id);
+            else initialSelected.delete(o.id);
+            renderSelected();
+            renderDropdown();
+            if (window.__dashScheduleNavigate) window.__dashScheduleNavigate();
+          });
+
+          const text = document.createElement('span');
+          text.innerHTML = escapeHtml(o.name);
+
+          row.appendChild(cb);
+          row.appendChild(text);
+          $dropdownItems.appendChild(row);
+        }
+      }
+
+      if ($search) {
+        $search.addEventListener('focus', () => {
+          openDropdown();
+          renderDropdown();
+        });
+        $search.addEventListener('input', () => {
+          openDropdown();
+          renderDropdown();
+        });
+        $search.addEventListener('keydown', (e) => {
+          if (e.key === 'Escape') {
+            closeDropdown();
+          }
+        });
+      }
+
+      document.addEventListener('click', (e) => {
+        const t = e.target;
+        if (!t) return;
+        if (t === $search) return;
+        if ($dropdown && $dropdown.contains(t)) return;
+        closeDropdown();
+      });
+
+      renderSelected();
+      renderDropdown();
+    })();
+  </script>
+
+  <script>
+    (function () {
+      const form = document.querySelector('form[action="/admin/dashboards"]');
+      const chartInput = document.getElementById('chart_input');
+      const percentWrap = document.getElementById('percent_toggle_wrap');
+      const advanced = document.querySelector('details.dash-advanced');
+      const detailsSel = document.getElementById('details_org_id');
+      if (!form || !chartInput) return;
+
+      let selectedChart = String(chartInput.value || {{ selected_chart|tojson }} || '');
+
+      // map (tab+sheet+view) -> chart_key
+      function chartKeyFor(tab, sheet, view){
+        if (tab === 'files') return 'uploads';
+        if (tab === 'backlog') return (sheet === 'szi') ? 'backlog_age_szi' : 'backlog_age_uib';
+        if (tab === 'statuses'){
+          if (view === 'breakdown') return (sheet === 'szi') ? 'statuses_breakdown_szi' : 'statuses_breakdown_uib';
+          if (view === 'levels') return (sheet === 'szi') ? 'levels_statuses_szi' : 'levels_statuses_uib';
+          if (view === 'sections') return (sheet === 'szi') ? 'szi_section_statuses' : 'uib_section_statuses';
+          return (sheet === 'szi') ? 'statuses_szi' : 'statuses_uib';
+        }
+        // index tab
+        if (view === 'radar') return (sheet === 'szi') ? 'szi_radar' : 'uib_radar';
+        return (sheet === 'szi') ? 'szi_overall' : 'uib_overall';
+      }
+
+      function tabFromChart(k){
+        if (k === 'uploads') return 'files';
+        if (k.startsWith('backlog_age')) return 'backlog';
+        if (k.startsWith('uib_') || k.startsWith('szi_')) return 'index';
+        if (k.includes('status')) return 'statuses';
+        return 'index';
+      }
+      function sheetFromChart(k){
+        if (k.startsWith('szi_') || k.endsWith('_szi')) return 'szi';
+        return 'uib';
+      }
+      function viewFromChart(k){
+        if (k.endsWith('_radar')) return 'radar';
+        if (k.endsWith('_section_statuses')) return 'sections';
+        if (k.startsWith('statuses_breakdown')) return 'breakdown';
+        if (k.startsWith('levels_statuses')) return 'levels';
+        return 'overall';
+      }
+
+      function chartNeedsDetails(v){
+        return [
+          'uib_radar','szi_radar',
+          'statuses_breakdown','statuses_breakdown_uib','statuses_breakdown_szi',
+          'levels_statuses','levels_statuses_uib','levels_statuses_szi',
+          'uib_section_statuses','szi_section_statuses',
+          'backlog_age','backlog_age_uib','backlog_age_szi'
+        ].includes(v);
+      }
+      function chartIsStacked(v){
+        return [
+          'statuses','statuses_uib','statuses_szi',
+          'statuses_breakdown','statuses_breakdown_uib','statuses_breakdown_szi',
+          'levels_statuses','levels_statuses_uib','levels_statuses_szi',
+          'uib_section_statuses','szi_section_statuses',
+          'backlog_age','backlog_age_uib','backlog_age_szi'
+        ].includes(v);
+      }
+
+      function setActive(containerId, attr, value){
+        const el = document.getElementById(containerId);
+        if (!el) return;
+        for (const b of el.querySelectorAll('.seg-btn')){
+          const v = b.getAttribute(attr);
+          b.classList.toggle('seg-btn--active', v === value);
+        }
+      }
+
+      function applyVisibility(tab){
+        const sheet = document.getElementById('dash_sheet');
+        const view = document.getElementById('dash_view');
+        if (sheet) sheet.style.display = (tab === 'index' || tab === 'statuses') ? '' : 'none';
+        if (view) {
+          for (const b of view.querySelectorAll('.seg-btn')){
+            const v = b.getAttribute('data-view');
+            let ok = false;
+            if (tab === 'index') ok = (v === 'overall' || v === 'radar');
+            if (tab === 'statuses') ok = (v === 'overall' || v === 'sections' || v === 'breakdown' || v === 'levels');
+            b.style.display = ok ? '' : 'none';
+          }
+        }
+      }
+
+      function applyUiByChart(){
+        const v = selectedChart;
+        if (percentWrap) percentWrap.style.display = chartIsStacked(v) ? '' : 'none';
+        if (detailsSel) detailsSel.disabled = !chartNeedsDetails(v);
+        const hasOrg = !!(document.querySelectorAll('input[name="org_ids"]').length);
+        if (advanced) advanced.style.display = (chartNeedsDetails(v) && hasOrg) ? '' : 'none';
+      }
+
+      function navigateNow(){
+        const fd = new FormData(form);
+        const params = new URLSearchParams();
+        for (const [key, val] of fd.entries()){
+          const s = String(val ?? '').trim();
+          if (!s) continue;
+          params.append(key, s);
+        }
+        params.set('chart', String(chartInput.value || selectedChart || ''));
+        window.location.search = params.toString();
+      }
+
+      let navTimer = null;
+      function scheduleNavigate(){
+        if (navTimer) clearTimeout(navTimer);
+        navTimer = setTimeout(() => navigateNow(), 350);
+      }
+      // allow org-search script to trigger nav
+      window.__dashScheduleNavigate = scheduleNavigate;
+
+      // init segmented state
+      const initTab = tabFromChart(selectedChart);
+      const initSheet = sheetFromChart(selectedChart);
+      const initView = viewFromChart(selectedChart);
+      setActive('dash_tab','data-tab', initTab);
+      setActive('dash_sheet','data-sheet', initSheet);
+      setActive('dash_view','data-view', initView);
+      applyVisibility(initTab);
+      applyUiByChart();
+
+      // segmented clicks -> immediate navigate
+      const tabEl = document.getElementById('dash_tab');
+      const sheetEl = document.getElementById('dash_sheet');
+      const viewEl = document.getElementById('dash_view');
+      if (tabEl){
+        tabEl.addEventListener('click', (e) => {
+          const b = e.target.closest('.seg-btn');
+          if (!b) return;
+          const tab = b.getAttribute('data-tab');
+          if (!tab) return;
+          const sheet = sheetFromChart(selectedChart);
+          const view = 'overall';
+          const k = chartKeyFor(tab, sheet, view);
+          chartInput.value = k;
+          selectedChart = k;
+          setActive('dash_tab','data-tab', tab);
+          applyVisibility(tab);
+          applyUiByChart();
+          navigateNow();
+        });
+      }
+      if (sheetEl){
+        sheetEl.addEventListener('click', (e) => {
+          const b = e.target.closest('.seg-btn');
+          if (!b) return;
+          const sheet = b.getAttribute('data-sheet');
+          if (!sheet) return;
+          const tab = tabFromChart(selectedChart);
+          const view = viewFromChart(selectedChart);
+          const k = chartKeyFor(tab, sheet, view);
+          chartInput.value = k;
+          selectedChart = k;
+          setActive('dash_sheet','data-sheet', sheet);
+          applyUiByChart();
+          navigateNow();
+        });
+      }
+      if (viewEl){
+        viewEl.addEventListener('click', (e) => {
+          const b = e.target.closest('.seg-btn');
+          if (!b) return;
+          const view = b.getAttribute('data-view');
+          if (!view) return;
+          const tab = tabFromChart(selectedChart);
+          const sheet = sheetFromChart(selectedChart);
+          const k = chartKeyFor(tab, sheet, view);
+          chartInput.value = k;
+          selectedChart = k;
+          setActive('dash_view','data-view', view);
+          applyUiByChart();
+          navigateNow();
+        });
+      }
+
+      // any filter change -> auto navigate (debounced)
+      for (const el of form.querySelectorAll('input[name="date_from"], input[name="date_to"], select[name="details_org_id"], input[name="dim_topic"], input[name="dim_domain"], select[name="topic"], select[name="domain"], input[name="top_n"]')){
+        el.addEventListener('change', () => scheduleNavigate());
+      }
+      const topN = form.querySelector('input[name="top_n"]');
+      if (topN) topN.addEventListener('input', () => scheduleNavigate());
+    })();
+  </script>
+
+  {% if selected_org_ids|length == 0 %}
+    <div class="card"><div class="muted">Выберите одну или несколько организаций и нажмите «Построить».</div></div>
+  {% else %}
+    <div class="card">
+      <div class="muted" style="margin-bottom:10px">
+        Выбрано организаций: <b>{{ selected_org_ids|length }}</b>
+        {% if date_from or date_to %}
+          · диапазон: <span class="mono">{{ date_from or "…" }}</span> — <span class="mono">{{ date_to or "…" }}</span>
+        {% else %}
+          · диапазон: <span class="muted">не задан (берём все данные)</span>
+        {% endif %}
+      </div>
+
+      <div class="card" style="margin:0">
+        <h3 style="margin-top:0">{{ chart_title }}</h3>
+        {% if chart_subtitle %}
+          <div class="muted" style="margin-bottom:10px">{{ chart_subtitle }}</div>
+        {% endif %}
+        <div class="table-wrap" style="padding:0; background:transparent">
+          <canvas id="dash_chart" height="420"></canvas>
+        </div>
+      </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script>
+      const dash = {{ dash|tojson }};
+      const selectedChart = {{ selected_chart|tojson }};
+
+      function fmt(v) {
+        if (v === null || v === undefined) return null;
+        const x = Number(v);
+        if (!Number.isFinite(x)) return null;
+        return x;
+      }
+
+      function makeOverallChart(canvasId, title, rows) {
+        const labels = rows.map(r => r.org_name);
+        const kb1 = rows.map(r => fmt(r.kb1));
+        const kb2 = rows.map(r => fmt(r.kb2));
+        const kb3 = rows.map(r => fmt(r.kb3));
+        const ctx = document.getElementById(canvasId);
+        if (!ctx) return;
+        return new Chart(ctx, {
+          type: 'bar',
+          data: {
+            labels,
+            datasets: [
+              { label: 'КБ1 (L1)', data: kb1, backgroundColor: 'rgba(147, 197, 253, 0.9)' },
+              { label: 'КБ2 (L2)', data: kb2, backgroundColor: 'rgba(253, 230, 138, 0.9)' },
+              { label: 'КБ3 (L3)', data: kb3, backgroundColor: 'rgba(216, 180, 254, 0.9)' },
+            ]
+          },
+          options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {
+              title: { display: false, text: title },
+              legend: { position: 'bottom' },
+              tooltip: { callbacks: { label: (ctx) => `${ctx.dataset.label}: ${ctx.parsed.y?.toFixed?.(2) ?? ctx.parsed.y}` } }
+            },
+            scales: {
+              y: { min: 0, max: 5, ticks: { stepSize: 1 } }
+            }
+          }
+        });
+      }
+
+      function makeCategoryChart(canvasId, title, categories) {
+        const ctx = document.getElementById(canvasId);
+        if (!ctx) return;
+        const labels = categories.map(c => c.title);
+        const kb1 = categories.map(c => fmt(c.kb1));
+        const kb2 = categories.map(c => fmt(c.kb2));
+        const kb3 = categories.map(c => fmt(c.kb3));
+        return new Chart(ctx, {
+          type: 'bar',
+          data: {
+            labels,
+            datasets: [
+              { label: 'КБ1 (L1)', data: kb1, backgroundColor: 'rgba(147, 197, 253, 0.9)' },
+              { label: 'КБ2 (L2)', data: kb2, backgroundColor: 'rgba(253, 230, 138, 0.9)' },
+              { label: 'КБ3 (L3)', data: kb3, backgroundColor: 'rgba(216, 180, 254, 0.9)' },
+            ]
+          },
+          options: {
+            indexAxis: 'y',
+            responsive: true,
+            plugins: {
+              title: { display: false, text: title },
+              legend: { position: 'bottom' },
+            },
+            scales: {
+              x: { min: 0, max: 5, ticks: { stepSize: 1 } }
+            }
+          }
+        });
+      }
+
+      function makeUploadsChart(canvasId, payload) {
+        const ctx = document.getElementById(canvasId);
+        if (!ctx) return;
+        const labels = (payload && payload.labels) || [];
+        const series = (payload && payload.series) || [];
+        const colors = ['#6B2DFF', '#22C55E', '#0EA5E9', '#F59E0B', '#EF4444', '#A855F7', '#14B8A6', '#64748B'];
+        const datasets = series.map((s, i) => ({
+          label: s.org_name,
+          data: s.data,
+          borderColor: colors[i % colors.length],
+          backgroundColor: colors[i % colors.length] + '33',
+          tension: 0.2,
+          fill: false,
+        }));
+        return new Chart(ctx, {
+          type: 'line',
+          data: { labels, datasets },
+          options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: { legend: { position: 'bottom' } },
+            scales: { y: { beginAtZero: true, ticks: { precision: 0 } } }
+          }
+        });
+      }
+
+      function makeStackedBar(canvasId, payload) {
+        const ctx = document.getElementById(canvasId);
+        if (!ctx) return;
+        const labels = payload.labels || [];
+        const dsRaw = (payload.datasets || []).map((d) => ({ label: d.label, data: (d.data || []).map(x => Number(x) || 0) }));
+        const normalize = !!payload.normalizeToPercent;
+        const totals = labels.map((_, i) => dsRaw.reduce((acc, d) => acc + (d.data[i] || 0), 0));
+        const ds = dsRaw.map((d, idx) => {
+          const palette = ['rgba(34,197,94,0.85)','rgba(147,197,253,0.9)','rgba(249,115,22,0.85)','rgba(148,163,184,0.85)','rgba(239,68,68,0.75)'];
+          const data = d.data.map((v, i) => {
+            if (!normalize) return v;
+            const t = totals[i] || 0;
+            return t > 0 ? (v * 100.0) / t : 0;
+          });
+          // if single org/label — embed absolute counts in legend label
+          const label = (labels.length === 1 && normalize) ? `${d.label} (${d.data[0] || 0})` : d.label;
+          return { label, data, backgroundColor: palette[idx % palette.length] };
+        });
+        const indexAxis = (payload && payload.indexAxis) || 'x';
+        return new Chart(ctx, {
+          type: 'bar',
+          data: { labels, datasets: ds },
+          options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {
+              legend: { position: 'bottom' },
+              tooltip: {
+                callbacks: {
+                  label: (c) => {
+                    const dsIdx = c.datasetIndex;
+                    const i = c.dataIndex;
+                    const abs = (dsRaw[dsIdx] && dsRaw[dsIdx].data[i]) || 0;
+                    const t = totals[i] || 0;
+                    if (normalize) {
+                      const pct = t > 0 ? (abs * 100.0) / t : 0;
+                      return `${c.dataset.label}: ${pct.toFixed(1)}% (${abs}/${t})`;
+                    }
+                    return `${c.dataset.label}: ${abs}`;
+                  }
+                }
+              }
+            },
+            indexAxis,
+            scales: {
+              x: {
+                stacked: true,
+                beginAtZero: true,
+                max: normalize ? 100 : undefined,
+                ticks: { precision: 0, callback: (v) => normalize ? (v + '%') : v }
+              },
+              y: { stacked: true, beginAtZero: true, ticks: { precision: 0 } }
+            }
+          }
+        });
+      }
+
+      function makeRadar(canvasId, payload) {
+        const ctx = document.getElementById(canvasId);
+        if (!ctx) return;
+        const labels = payload.labels || [];
+        const dsIn = payload.datasets || [];
+        const colors = [
+          { border: 'rgba(132,204,22,0.9)', fill: 'rgba(132,204,22,0.10)' },   // kb3
+          { border: 'rgba(34,197,94,0.9)', fill: 'rgba(34,197,94,0.10)' },     // kb2
+          { border: 'rgba(168,85,247,0.9)', fill: 'rgba(168,85,247,0.08)' },   // kb1
+          { border: 'rgba(236,72,153,0.9)', fill: 'rgba(236,72,153,0.06)' },   // calc
+          { border: 'rgba(17,24,39,0.8)', fill: 'rgba(17,24,39,0.04)' },       // current
+        ];
+        const datasets = dsIn.map((d, i) => ({
+          label: d.label,
+          data: d.data,
+          borderColor: colors[i % colors.length].border,
+          backgroundColor: colors[i % colors.length].fill,
+          pointRadius: 2,
+          borderWidth: 2,
+        }));
+        return new Chart(ctx, {
+          type: 'radar',
+          data: { labels, datasets },
+          options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: { legend: { position: 'right' } },
+            scales: {
+              r: {
+                min: 0,
+                max: 5,
+                ticks: { stepSize: 0.5 },
+                pointLabels: { font: { size: 12 } }
+              }
+            }
+          }
+        });
+      }
+
+      const canvasId = 'dash_chart';
+      const percentToggle = document.getElementById('percent_toggle');
+
+      let chartInstance = null;
+      function renderChart() {
+        if (chartInstance && typeof chartInstance.destroy === 'function') {
+          chartInstance.destroy();
+        }
+        chartInstance = null;
+
+        if (selectedChart === 'uib_overall' || selectedChart === 'szi_overall') {
+          chartInstance = makeOverallChart(canvasId, '', (dash.data && dash.data.rows) || []);
+          return;
+        }
+        if (selectedChart === 'uib_radar' || selectedChart === 'szi_radar') {
+          chartInstance = makeRadar(canvasId, dash.data || {});
+          return;
+        }
+        if (selectedChart === 'uploads') {
+          chartInstance = makeUploadsChart(canvasId, dash.data || {});
+          return;
+        }
+
+        // statuses/backlog stacked charts
+        if (
+          selectedChart === 'statuses' || selectedChart === 'statuses_uib' || selectedChart === 'statuses_szi' ||
+          selectedChart.startsWith('statuses_breakdown') ||
+          selectedChart.startsWith('levels_statuses') ||
+          selectedChart === 'uib_section_statuses' || selectedChart === 'szi_section_statuses' ||
+          selectedChart.startsWith('backlog_age')
+        ) {
+          const payload = Object.assign({}, (dash.data || {}));
+          payload.normalizeToPercent = !!(percentToggle && percentToggle.checked);
+          payload.indexAxis = payload.indexAxis || 'y'; // для статусов/бэклога читабельнее горизонтально
+          chartInstance = makeStackedBar(canvasId, payload);
+        }
+      }
+
+      renderChart();
+      if (percentToggle) {
+        percentToggle.addEventListener('change', () => renderChart());
+      }
+    </script>
+  {% endif %}
+{% endblock %}
+

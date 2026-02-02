@@ -20,15 +20,6 @@
         <input name="name" value="{{ org.name }}" required />
       </div>
       <div>
-        <label>Период аудита</label>
-        <select name="audit_period_id">
-          <option value="">(не задан)</option>
-          {% for p in periods %}
-            <option value="{{ p.id }}" {% if org.audit_period_id == p.id %}selected{% endif %}>{{ p.name }} ({{ p.date_from|d }} — {{ p.date_to|d }})</option>
-          {% endfor %}
-        </select>
-      </div>
-      <div>
         <label>Уровень (набор артефактов)</label>
         <select name="artifact_level_id">
           <option value="">(не задан)</option>

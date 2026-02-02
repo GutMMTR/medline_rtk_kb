@@ -24,18 +24,14 @@
             {% endfor %}
           </select>
 
-          {% if periods is defined and periods and selected_org_id %}
-            <label style="margin:0">Период</label>
-            <select name="period_id" onchange="this.form.submit()" style="width: 280px;">
-              {% for p in periods %}
-                <option value="{{ p.id }}" {% if p.id == selected_period_id %}selected{% endif %}>{{ p.name }} ({{ p.date_from|d }} — {{ p.date_to|d }})</option>
-              {% endfor %}
-            </select>
-          {% endif %}
+          <label style="margin:0">Диапазон</label>
+          <input type="date" name="date_from" value="{{ date_from or '' }}" style="width: 160px;" />
+          <span class="muted">—</span>
+          <input type="date" name="date_to" value="{{ date_to or '' }}" style="width: 160px;" />
         </form>
       {% endif %}
       {% if selected_org_id %}
-        <a class="btn btn-secondary" href="{{ _base }}/index-kb/szi/export.xlsx?org_id={{ selected_org_id }}{% if selected_period_id %}&period_id={{ selected_period_id }}{% endif %}">Выгрузить Excel</a>
+        <a class="btn btn-secondary" href="{{ _base }}/index-kb/szi/export.xlsx?org_id={{ selected_org_id }}{% if date_from %}&date_from={{ date_from }}{% endif %}{% if date_to %}&date_to={{ date_to }}{% endif %}">Выгрузить Excel</a>
         <a class="btn btn-secondary" href="{{ _base }}/index-kb?org_id={{ selected_org_id }}&sheet={{ sheet_name }}" title="Вернуться к основной странице Индекса КБ (Excel-вид)">Индекс КБ</a>
         <a class="btn btn-secondary" href="{{ _art }}?org_id={{ selected_org_id }}">Артефакты</a>
         <a class="btn btn-secondary" href="{{ _files }}?org_id={{ selected_org_id }}">Файлы</a>
@@ -137,9 +133,9 @@
                       —
                     {% endif %}
                   </td>
-                  <td class="kb-cell kb-kb3">{% if rv.value is not none %}{{ "%.1f"|format(rv.value) }}{% else %}—{% endif %}</td>
-                  <td class="kb-cell kb-kb2">{% if rv.value is not none %}{{ "%.1f"|format(rv.value) }}{% else %}—{% endif %}</td>
-                  <td class="kb-cell kb-kb1">{% if rv.value is not none %}{{ "%.1f"|format(rv.value) }}{% else %}—{% endif %}</td>
+                  <td class="kb-cell kb-kb3">{% if rv.kb3 is not none %}{{ "%.1f"|format(rv.kb3) }}{% else %}—{% endif %}</td>
+                  <td class="kb-cell kb-kb2">{% if rv.kb2 is not none %}{{ "%.1f"|format(rv.kb2) }}{% else %}—{% endif %}</td>
+                  <td class="kb-cell kb-kb1">{% if rv.kb1 is not none %}{{ "%.1f"|format(rv.kb1) }}{% else %}—{% endif %}</td>
                   <td class="muted">{{ rv.source }}</td>
                   {% if not readonly %}
                     <td>
@@ -147,7 +143,7 @@
                         <form method="post" action="{{ _base }}/index-kb/szi/manual" class="kb-form">
                           <input type="hidden" name="org_id" value="{{ selected_org_id }}" />
                           <input type="hidden" name="row_key" value="{{ rv.row.row_key }}" />
-                          <input class="kb-input" type="number" name="value" step="0.1" min="0" max="5" value="{% if rv.value is not none %}{{ "%.1f"|format(rv.value) }}{% endif %}" placeholder="0..5" />
+                          <input class="kb-input" type="number" name="value" step="0.1" min="0" max="5" value="{% if rv.kb3 is not none %}{{ "%.1f"|format(rv.kb3) }}{% endif %}" placeholder="0..5" />
                           <button class="btn btn-secondary" type="submit">Сохранить</button>
                         </form>
                         {% if rv.updated_at %}

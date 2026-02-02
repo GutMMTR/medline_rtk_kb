@@ -64,6 +64,15 @@ th { color:#344054; font-size: 12px; text-transform: uppercase; letter-spacing: 
 .filter-form > .filter-actions { flex-direction: row; }
 .filter-actions .btn { height: 40px; padding: 0 14px; line-height: 38px; }
 
+/* Auditor artifacts: period control */
+.filter-period{ min-width: 0; }
+.filter-period__row{
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
 /* Filter meta row (period/level/in_period checkbox) */
 .filter-meta{
   grid-column: 1 / -1;
@@ -97,6 +106,55 @@ th { color:#344054; font-size: 12px; text-transform: uppercase; letter-spacing: 
 /* Don't stretch checkbox controls to full width */
 input[type="checkbox"]{ width: auto; padding: 0; }
 
+/* Dashboards */
+.dash-advanced{
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 10px 12px;
+  background: #fff;
+}
+.dash-advanced > summary{
+  cursor: pointer;
+  user-select: none;
+  font-weight: 700;
+  color: #344054;
+  list-style: none;
+}
+.dash-advanced > summary::-webkit-details-marker{ display:none; }
+.dash-advanced > summary:after{
+  content: "▾";
+  float: right;
+  color: var(--muted);
+}
+.dash-advanced[open] > summary:after{ content: "▴"; }
+
+/* Segmented controls (dashboards) */
+.segmented{
+  display:flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  padding: 6px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: #fff;
+}
+.seg-btn{
+  padding: 8px 10px;
+  border-radius: 10px;
+  border: 1px solid rgba(107,45,255,.18);
+  background: rgba(107,45,255,.04);
+  color: #344054;
+  cursor: pointer;
+  font-weight: 700;
+  font-size: 13px;
+}
+.seg-btn:hover{ background: rgba(107,45,255,.08); }
+.seg-btn--active{
+  background: rgba(107,45,255,.14);
+  border-color: rgba(107,45,255,.45);
+  color: var(--rtk-purple);
+}
+
 /* Filters: on narrow screens keep the action button on a separate row */
 .filter-form--status > .filter-actions,
 .filter-form--nostatus > .filter-actions { grid-column: 1 / -1; }
@@ -119,7 +177,9 @@ input[type="checkbox"]{ width: auto; padding: 0; }
   /* Auditor artifacts: single status select -> avoid empty right half */
   .filter-form--auditor-artifacts .filter-status { grid-column: span 2; }
   .filter-form--auditor-artifacts .filter-short { grid-column: span 3; }
+  .filter-form--auditor-artifacts .filter-period { grid-column: span 2; }
   .filter-form--auditor-artifacts .filter-actions { grid-column: span 1; }
+  .filter-form--auditor-artifacts .filter-inperiod { grid-column: 1 / -1; }
 
   /* Pages WITHOUT status filter (artifact directory) */
   .filter-form--nostatus .filter-short { grid-column: span 5; }

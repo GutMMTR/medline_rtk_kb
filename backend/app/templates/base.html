@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>{{ title or "Медлайн.РТК.КБ" }}</title>
-    <link rel="stylesheet" href="/static/app.css?v=29" />
+    <link rel="stylesheet" href="/static/app.css?v=30" />
     <link rel="icon" href="/static/brand/rtk_mark.svg" type="image/svg+xml" />
   </head>
   <body>
@@ -29,7 +29,7 @@
       </div>
       {% endif %}
     </div>
-    <div class="{{ container_class or 'container' }}">
+    <div class="{% block container_class %}{{ container_class or 'container' }}{% endblock %}">
       {% block content %}{% endblock %}
     </div>
     <script>

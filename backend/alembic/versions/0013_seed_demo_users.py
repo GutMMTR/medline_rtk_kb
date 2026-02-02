@@ -20,7 +20,7 @@ depends_on = None
 
 
 SYSTEM_ORG_NAME = "Default"
-DEMO_ORG_NAME = "Демо организация"
+DEMO_ORG_NAME = "Медлайн"
 
 
 def _utcnow() -> datetime:
@@ -96,7 +96,7 @@ def upgrade() -> None:
     demo_org_id = _ensure_org(conn, name=DEMO_ORG_NAME)
 
     auditor_id = _ensure_user(conn, login="auditor", password="auditor12345", full_name="Default Auditor", is_admin=False)
-    customer_id = _ensure_user(conn, login="customer", password="customer12345", full_name="Demo Customer", is_admin=False)
+    customer_id = _ensure_user(conn, login="medline", password="medline12345", full_name="Medline Customer", is_admin=False)
 
     # Auditor is treated as "global" in MVP if has at least one auditor membership.
     _ensure_membership(conn, user_id=auditor_id, org_id=system_org_id, role="auditor")

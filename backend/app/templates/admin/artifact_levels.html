@@ -63,7 +63,12 @@
         <tbody>
           {% for l in levels %}
             <tr>
-              <td class="mono">{{ l.code }}</td>
+              <td class="mono">
+                {{ l.code }}
+                {% if l.code == "L1" %}<span class="muted">(КБ1)</span>{% endif %}
+                {% if l.code == "L2" %}<span class="muted">(КБ2)</span>{% endif %}
+                {% if l.code == "L3" %}<span class="muted">(КБ3)</span>{% endif %}
+              </td>
               <td>
                 <form method="post" action="/admin/artifact-levels/{{ l.id }}" class="row-right" style="justify-content:flex-start; gap:8px">
                   <input name="name" value="{{ l.name }}" required style="min-width:260px" />

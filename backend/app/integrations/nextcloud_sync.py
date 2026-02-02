@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 
 from app.audit.service import write_audit_log
 from app.core.config import settings
-from app.db.models import Artifact, ArtifactLevel, AuditPeriod, FileVersion, NextcloudRemoteFileState, OrgArtifact, OrgArtifactReviewStatus, OrgArtifactStatus, Organization, User
+from app.db.models import Artifact, ArtifactLevel, FileVersion, NextcloudRemoteFileState, OrgArtifact, OrgArtifactReviewStatus, OrgArtifactStatus, Organization, User
 from app.integrations.nextcloud_dav import NextcloudDavClient
 
 
@@ -160,12 +160,10 @@ def _ensure_org(db: Session, org_name: str, create_orgs: bool) -> Organization |
         return org
     if not create_orgs:
         return None
-    ap_id = db.query(AuditPeriod.id).filter(AuditPeriod.code == "P365").scalar()
     lvl_id = db.query(ArtifactLevel.id).filter(ArtifactLevel.code == "L3").scalar()
     org = Organization(
         name=org_name,
         created_via="nextcloud",
-        audit_period_id=int(ap_id) if ap_id else None,
         artifact_level_id=int(lvl_id) if lvl_id else None,
     )
     db.add(org)

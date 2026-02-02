@@ -1,84 +1,115 @@
-# Медлайн.РТК.КБ — кабинет аудитора/заказчика + админ‑панель (FastAPI + Postgres)
+# Приложение Медлайн.РТК.КБ (рабочее название)
 
-Веб‑приложение для ведения справочника артефактов, загрузки/версий файлов по организациям, комментариев аудитора и отчёта «Индекс КБ». Есть админ‑панель и интеграция с Nextcloud (WebDAV) для автоматического импорта артефактов.
+Приложение Медлайн.РТК.КБ (рабочее название)
+
+- Основная цель − ведение аудита информационной безопасности.
+
+Основные функции:
+- Расчет индекса безопасности
+- Справочник артефактов
+- Загрузка файлов по организациям
+- Версионирование изменений
+- Статус и замечания аудита
+- Выгрузка офлайн отчетов
+- Интеграция с хранилищем (Nextcloud WebDAV)
+- Панель управления (админ‑панель)
+- Управление ролями
+- Дашборды в админ‑панели (Индекс КБ / Статусы / Файлы / Бэклог)
+- Индекс КБ по листам «Управление ИБ» и «СЗИ»
 
 ## Содержание
 - [Что умеет система](#что-умеет-система)
 - [Роли и доступы](#роли-и-доступы)
 - [Запуск (Docker)](#запуск-docker)
 - [Конфигурация (env)](#конфигурация-env)
+- [Демо-данные](#демо-данные)
 - [Основные страницы (UI)](#основные-страницы-ui)
+- [Индекс КБ: расчёт и визуализации](#индекс-кб-расчёт-и-визуализации)
 - [Интеграция с Nextcloud](#интеграция-с-nextcloud)
-- [Индекс КБ](#индекс-кб)
 - [Схема БД (обзор)](#схема-бд-обзор)
-- [Схема БД (детально)](#схема-бд-детально)
+- [Схема БД (ER + таблицы)](#схема-бд-er--таблицы)
 - [Миграции](#миграции)
 - [Диагностика и частые проблемы](#диагностика-и-частые-проблемы)
 
 ## Что умеет система
-- **Справочник артефактов**: импорт из Excel (лист «Программа») и просмотр.
-- **Артефакты организации**:
-  - статус **«Загружен/Не загружен»**
-  - загрузка файлов (лимит `MAX_UPLOAD_MB`)
-  - хранение **версий** файлов (актуальная версия + история для админа)
-  - **комментарии аудитора** к артефактам (последний комментарий видит и заказчик).
-- **Проводник файлов**: просмотр по структуре папок, построенной из `short_name` (например `ВССТ.КМНК.1 → ВССТ/КМНК/1`).
-- **Интеграция Nextcloud (WebDAV)**:
-  - настройки подключения в админке
-  - тест соединения / поиск организаций (папки) / синхронизация файлов
-  - идемпотентность по `etag` + размер файла (не перезаливает неизменённые)
-  - создание организаций по папкам (опционально)
-  - версионирование при изменении файла в Nextcloud
-  - корректная работа с кириллицей в путях (URL‑encoding).
-- **Индекс КБ**: генерация/рендер табличного отчёта по эталонному шаблону.
-- **Админ‑панель**:
-  - организации: создание/редактирование/удаление (с защитой от удаления при связанных данных), “кем создана”
-  - пользователи: создание/редактирование, **блокировка**, удаление, фильтр по организации, пагинация/сортировка
-  - роли/доступы: назначение ролей пользователям в организациях.
+### Аудит по артефактам
+- **Артефакты организации** (`org_artifacts`):
+  - наличие файла (**Нет файла** / **Есть файл**),
+  - статус проверки аудитора (`review_status`): **Требует аудита / Проаудировано / Требует корректировки**,
+  - “**Изменён** после аудита” (когда загружена новая версия после проверки).
+- **Файлы и версии**:
+  - хранение **истории версий** (`file_versions`) и текущей версии,
+  - у аудитора/заказчика — работа с текущей версией, у админа — доступ к истории.
+- **Комментарии аудитора** (`org_artifact_comments`) с отображением последнего комментария.
+- **Журнал действий** (`audit_log`) по ключевым изменениям (upload/audit/comment/import и др.).
+
+### Уровни и эффективный набор (L1/L2/L3)
+- В системе есть уровни **L1/L2/L3** (`artifact_levels`).
+- Бизнес‑смысл: **КБ1 = L1**, **КБ2 = L2**, **КБ3 = L3**.
+- Эффективный набор для расчётов — это **объединение артефактов уровней ≤ выбранного** (на базе `artifact_level_items` и `organizations.artifact_level_id`).
+
+### Индекс КБ
+- Шаблон отчёта хранится в БД: `index_kb_template_rows` (группы/пункты, разделы).
+- По организации можно:
+  - смотреть табличный отчёт,
+  - вводить ручные значения (если в референсе “нет артефакта”),
+  - строить **радар** и другие графики.
+
+### Дашборды (админка)
+Страница: `GET /admin/dashboards`.
+
+Доступны графики (в зависимости от выбранного листа УИБ/СЗИ и фильтров):
+- **Индекс КБ**:
+  - общий индекс (КБ1/КБ2/КБ3),
+  - **радар по разделам** (как в шаблоне),
+- **Статусы** (по требованиям выбранного листа УИБ/СЗИ):
+  - по организациям (стек),
+  - по разделам шаблона,
+  - срез по тематикам/доменам,
+  - по уровням КБ,
+- **Файлы**: загрузки по дням,
+- **Бэклог**: “сколько дней без результата” (возраст текущей версии для статусов, требующих действий).
+
+### Nextcloud (WebDAV)
+- Настройка подключения, тест, синхронизация файлов по структуре каталогов.
+- Идемпотентность по `etag` + размеру и версионирование на изменение.
 
 ## Роли и доступы
 - **admin**
-  - полный доступ ко всем страницам
-  - видит и может скачивать **историю версий файлов**
-  - может удалять текущий файл артефакта (сброс статуса на «Не загружен» и очистка Nextcloud‑состояния, если файл был импортирован).
+  - полный доступ к админке, импорту, дашбордам,
+  - видит историю версий файлов.
 - **auditor**
-  - доступ к аудиту по организациям, добавление комментариев
-  - просмотр файлов/проводника
-  - **не** видит историю версий (только текущую).
-- **customer**
-  - доступ к своей организации (в текущем MVP ожидается **ровно одна** организация в membership’ах)
-  - видит статус/файл/последний комментарий аудитора (в UI — подсказкой на статусе)
-  - загружает/удаляет файл (удаление сбрасывает статус на «Не загружен», история версий сохраняется).
+  - аудит артефактов по организациям (комментарии/проверка),
+  - просмотр файлов/проводника,
+  - индекс КБ,
+  - без доступа к админ‑операциям.
+- **заказчик** (роль `customer`)
+  - доступ к своей организации (в MVP ожидается **ровно одна** организация в membership’ах),
+  - загрузка/удаление файлов по артефактам,
+  - видит статусы и последний комментарий аудитора.
 
 ## Запуск (Docker)
 Требования:
 - Docker Desktop (Linux engine / WSL2)
-- свободный порт **8000** (UI) и **5432** (Postgres)
+- свободные порты: **8000** (UI) и **5432** (Postgres)
 
-### Дефолтные учётки (dev)
-После первого запуска автоматически создаются:
-- **admin**: логин/пароль берутся из `docker-compose.yml` (`ADMIN_LOGIN`/`ADMIN_PASSWORD`), по умолчанию `admin / admin12345`
-- **auditor**: `auditor / auditor12345`
-- **customer**: `customer / customer12345` (привязан к организации **«Демо организация»**, чтобы была доступна в “Индекс КБ”)
-
-### 1) Поднять сервисы
+### Поднять сервисы
 В корне проекта:
 
 ```bash
 docker compose up -d --build
 ```
 
-Открыть UI:
-- `http://localhost:8000/login`
+UI: `http://localhost:8000/login`
 
-### 2) Остановить
+### Остановить
 
 ```bash
 docker compose down
 ```
 
-### 3) Полностью сбросить БД (чистый старт)
-Так как Postgres хранит данные в именованном docker volume, чтобы удалить все записи:
+### Полностью сбросить БД (чистый старт)
+Postgres хранит данные в volume `db_data`:
 
 ```bash
 docker compose down -v
@@ -87,42 +118,81 @@ docker compose up -d --build
 
 ## Конфигурация (env)
 Основные переменные (см. `env.example` и `docker-compose.yml`):
-- **`DATABASE_URL`**: строка подключения SQLAlchemy (по умолчанию Postgres в compose)
+- **`DATABASE_URL`**: строка подключения SQLAlchemy
 - **`APP_SECRET_KEY`**: секрет для подписи JWT
 - **`ADMIN_LOGIN`**, **`ADMIN_PASSWORD`**, **`ADMIN_FULL_NAME`**: дефолтный админ (создаётся при старте)
-- **`MAX_UPLOAD_MB`**: лимит загрузки файлов
+- **`MAX_UPLOAD_MB`**: лимит загрузки
+- **`SEED_DEMO_DATA`**: включить демо‑сид (см. ниже)
 
-Файлы/тома в `docker-compose.yml`:
-- `db_data` (docker volume) → данные Postgres
+Тома в `docker-compose.yml`:
+- `db_data` → данные Postgres
 - `./data/share` → “шара”/локальная папка (MVP‑инструменты миграции/импорта).
 
+## Демо-данные
+### Дефолтные учётки (dev)
+Создаются seed‑миграцией `0013_seed_demo_users`:
+- **admin**: логин/пароль берутся из `docker-compose.yml` (`ADMIN_LOGIN`/`ADMIN_PASSWORD`), по умолчанию **`admin / admin12345`**
+- **auditor**: **`auditor / auditor12345`**
+- **Медлайн (заказчик)**: **`medline / medline12345`** (роль `customer`, организация **«Медлайн»**)
+
+Важно: в README используем термин **«заказчик»**, в БД роль называется `customer`.
+
+### Демо-файлы и статусы
+Если `SEED_DEMO_DATA=1`, то при применении миграций на **чистой БД** создаются демо‑данные:
+- смешанные статусы (pending/approved/needs_correction/changed),
+- история версий (v1/v2) для части файлов,
+- данные под **Индекс КБ** (включая “Индекс КБ” артефакты для шаблонов и заполненный радар).
+
+Ключевые миграции демо‑сида:
+- `0016_seed_demo_all` — демо‑файлы и микс статусов
+- `0017_seed_demo_radar_full` — расширение покрытия (для радаров/разделов)
+- `0018_seed_kb_artifacts` — создаёт артефакты **под шаблоны Индекса КБ** (иначе радары пустые, т.к. справочник из CSV использует другие `short_name`)
+
+Если включили флаг после того, как БД уже была создана — демо‑сид **не “догонится” автоматически** (это миграции). Делайте `docker compose down -v`.
+
 ## Основные страницы (UI)
-### Админ‑панель
-- `GET /admin` — главная админ‑страница (плитки)
-- `GET /admin/orgs` — организации (с пагинацией/сортировкой, “кем создана”)
+### Админ
+- `GET /admin` — главная (плитки)
+- `GET /admin/dashboards` — дашборды (Индекс КБ / Статусы / Файлы / Бэклог)
+- `GET /admin/orgs` — организации (по ширине экрана, + столбец “Сотрудников”)
 - `GET /admin/orgs/{org_id}/users` — пользователи выбранной организации
-- `GET /admin/users` — пользователи (создание/редактирование, блокировка/удаление, фильтр по организации)
+- `GET /admin/users` — пользователи (создание/редактирование, блокировка/удаление, фильтры)
 - `GET /admin/memberships` — роли/доступы (назначение ролей)
-- `GET /admin/artifacts` — импорт артефактов (Excel, лист «Программа»)
+- `GET /admin/artifacts` — импорт справочника артефактов (Excel, лист «Программа»)
 - `GET /admin/integrations/nextcloud` — Nextcloud интеграция
+- `GET /admin/audit-log` — журнал событий (аудит)
 
 ### Аудитор
 - `GET /auditor/artifacts` — аудит (таблица артефактов по организации + комментарии)
 - `GET /auditor/files` — проводник файлов
-- `GET /auditor/index-kb` — индекс КБ
+- `GET /auditor/index-kb` — индекс КБ (УИБ/СЗИ)
 
 ### Заказчик
-- `GET /my/artifacts` — артефакты организации (последний комментарий аудитора виден подсказкой на статусе)
+- `GET /my/artifacts` — артефакты своей организации (статус/файл/последний комментарий)
 - `GET /my/files` — проводник файлов по структуре `short_name`
+
+## Индекс КБ: расчёт и визуализации
+### Что такое КБ1/КБ2/КБ3
+В расчётах это **уровни L1/L2/L3**:
+- **КБ1 → L1**
+- **КБ2 → L2**
+- **КБ3 → L3**
+
+### Авто‑расчёт (упрощённое правило MVP)
+Для каждой строки шаблона (по `short_name`) значение считается как:
+- **5**, если для артефактов с таким `short_name` в эффективном наборе есть файл и он **проаудирован** (audited==current и review_status=approved),
+- **0**, если файл есть, но не проаудирован,
+- **None**, если на данном уровне **нет** артефактов (n/a).
+
+Если задан диапазон дат:
+- берётся “последняя версия файла в диапазоне”,
+- и она считается 5 только если аудит (approved) тоже попадает в диапазон.
+
+### Радар/Разделы
+Радар строится по разделам шаблона (`group_code`) и отражает средние значения по пунктам раздела.
 
 ## Интеграция с Nextcloud
 Страница: `GET /admin/integrations/nextcloud`
-
-### Данные, которые вводит админ
-- базовый URL Nextcloud (`https://...`)
-- логин/пароль
-- корневая папка (откуда начинать синхронизацию)
-- флаг “создавать организации”
 
 ### Ожидаемая структура папок
 ```
@@ -136,59 +206,22 @@ ROOT/
 Соответствие артефакту: `ВССТ.КМНК.1`.
 
 ### Идемпотентность и версии
-- для каждого удалённого/импортированного файла хранится состояние в `nextcloud_remote_file_state` (remote_path, etag, size)
-- при изменении `etag/size` создаётся **новая FileVersion** и она становится текущей
-- если файл не изменился — **нет лишних обновлений БД**.
-
-## Индекс КБ
-UI:
-- `GET /auditor/index-kb` — просмотр/рендер листов отчёта по организации.
-Структура форм хранится в БД и заполняется seed‑миграциями Alembic (без парсинга Excel при запуске).
+- Состояние удалённого файла хранится в `nextcloud_remote_file_state` (remote_path, etag, size)
+- При изменении `etag/size` создаётся новая `file_versions` и становится текущей
+- Если файл не изменился — нет лишних обновлений в БД
 
 ## Схема БД (обзор)
-Ниже — “карта” таблиц (упрощённо, без всех индексов):
+Ключевые сущности:
+- **users / organizations / user_org_memberships** — пользователи, организации, роли
+- **artifact_nodes / artifacts** — справочник артефактов
+- **artifact_levels / artifact_level_items** — уровни L1/L2/L3 и состав “дельт” уровней
+- **org_artifacts / file_versions / org_artifact_comments** — заполнение по организациям, файлы, комментарии
+- **index_kb_template_rows / index_kb_manual_values** — шаблон Индекса КБ и ручные значения
+- **nextcloud_integration_settings / nextcloud_remote_file_state** — синхронизация Nextcloud
+- **audit_log** — журнал событий
 
-### Пользователи и доступы
-- **`users`**
-  - `login`, `password_hash`, `full_name`
-  - `is_active` (блокировка входа)
-  - `is_admin`
-- **`organizations`**
-  - `name`
-  - `created_at`
-  - `created_by_user_id` (кто создал вручную)
-  - `created_via` (`manual|nextcloud|system`)
-- **`user_org_memberships`**
-  - связь user↔org
-  - `role`: `admin|auditor|customer`
-
-### Справочник артефактов
-- **`artifact_nodes`**: дерево папок/узлов
-- **`artifacts`**: артефакт с полями из Excel (topic/domain/short_name/…)
-
-### Артефакты организации и файлы
-- **`org_artifacts`**
-  - связь org↔artifact
-  - `status` (`missing|uploaded`)
-  - `current_file_version_id`
-  - `updated_at`, `updated_by_user_id`
-- **`file_versions`**
-  - версии файлов на один `org_artifact`
-  - `version_no`, `original_filename`, `sha256`, `size_bytes`
-  - хранилище: MVP использует Postgres (`blob`)
-- **`org_artifact_comments`**
-  - комментарии аудитора по артефактам организации
-
-### Nextcloud
-- **`nextcloud_integration_settings`**: параметры подключения (MVP хранит пароль в БД)
-- **`nextcloud_remote_file_state`**: состояние удалённого файла для идемпотентности
-
-### Прочее
-- **`audit_log`**: аудит‑события (импорт/изменения и т.п.)
-- **`stored_files`**: ранняя “упрощённая” модель хранения файлов (исторически).
-
-## Схема БД (детально)
-Это “рабочее” описание схемы, чтобы быстрее ориентироваться в данных и интеграциях. Источник истины — модели SQLAlchemy: `backend/app/db/models.py`.
+## Схема БД (ER + таблицы)
+Источник истины по полям/индексам: `backend/app/db/models.py`.
 
 ### ER‑диаграмма (основные связи)
 
@@ -197,6 +230,10 @@ erDiagram
   ORGANIZATIONS ||--o{ USER_ORG_MEMBERSHIPS : has
   USERS         ||--o{ USER_ORG_MEMBERSHIPS : has
 
+  ARTIFACT_LEVELS ||--o{ ARTIFACT_LEVEL_ITEMS : has
+  ARTIFACTS       ||--o{ ARTIFACT_LEVEL_ITEMS : assigned
+  ORGANIZATIONS   }o--|| ARTIFACT_LEVELS : effective_level
+
   ARTIFACT_NODES ||--|| ARTIFACTS : owns
 
   ORGANIZATIONS ||--o{ ORG_ARTIFACTS : has
@@ -204,159 +241,77 @@ erDiagram
 
   ORG_ARTIFACTS ||--o{ FILE_VERSIONS : versions
   ORG_ARTIFACTS ||--o{ ORG_ARTIFACT_COMMENTS : comments
-
-  ORGANIZATIONS ||--o{ NEXTCLOUD_REMOTE_FILE_STATE : tracks
-  ORG_ARTIFACTS ||--o{ NEXTCLOUD_REMOTE_FILE_STATE : tracks
   FILE_VERSIONS ||--o{ FILE_PREVIEWS : previews
 
-  ORGANIZATIONS ||--o{ INDEX_KB_MANUAL_VALUES : manual_values
   INDEX_KB_TEMPLATE_ROWS ||--o{ INDEX_KB_MANUAL_VALUES : keyed_by_row
+  ORGANIZATIONS          ||--o{ INDEX_KB_MANUAL_VALUES : manual_values
+
+  NEXTCLOUD_INTEGRATION_SETTINGS ||--o{ NEXTCLOUD_REMOTE_FILE_STATE : stores_state
+  ORGANIZATIONS ||--o{ NEXTCLOUD_REMOTE_FILE_STATE : tracks
+  ORG_ARTIFACTS ||--o{ NEXTCLOUD_REMOTE_FILE_STATE : tracks
 
   USERS ||--o{ AUDIT_LOG : actor
   ORGANIZATIONS ||--o{ AUDIT_LOG : org
 ```
 
-### Пользователи и доступы
-- **`organizations`**
-  - **`id`**: PK
-  - **`name`**: уникальное имя организации (видно в UI)
-  - **`created_at`**
-  - **`created_by_user_id`**: кто создал вручную (nullable)
-  - **`created_via`**: `manual|nextcloud|system` (для UI/диагностики)
-- **`users`**
-  - **`login`**: уникален
-  - **`password_hash`**: bcrypt‑хеш
-  - **`full_name`**
-  - **`is_active`**: блокировка входа
-  - **`is_admin`**: глобальный админ
-  - **`created_at`**
-- **`user_org_memberships`**
-  - **`user_id`** → `users.id`
-  - **`org_id`** → `organizations.id`
-  - **`role`**: `admin|auditor|customer`
-  - **`created_at`**
-  - уникальность: `(user_id, org_id)`
+### Таблицы (кратко)
+#### `organizations`
+- `created_via`: `manual|nextcloud|system`
+- `artifact_level_id`: выбранный уровень L1/L2/L3 для “текущего” расчёта
 
-### Справочник артефактов (референсные данные)
-- **`artifact_nodes`**: дерево папок/узлов
-  - **`id`**: PK
-  - **`parent_id`** → `artifact_nodes.id`
-  - **`segment`**: “кусок” пути
-  - **`full_path`**: уникальный путь через точки (напр. `Восстановление.Планирование...`)
-  - **`sort_order`**
-  - **`created_at`**
-- **`artifacts`**: один артефакт на один `artifact_nodes`
-  - **`id`**: PK
-  - **`node_id`** → `artifact_nodes.id` (уникален)
-  - **`artifact_key`**: уникальный ключ (nullable)
-  - **`topic`**, **`domain`**, **`kb_level`**
-  - **`indicator_name`**
-  - **`short_name`**: ключ “папочной” структуры в UI/Nextcloud (`ВССТ.КМНК.1`)
-  - **`achievement_text`**, **`achievement_item_no`**, **`achievement_item_text`**
-  - **`title`**, **`description`**
-  - **`created_at`**
+#### `user_org_memberships`
+- связь user↔org, роль: `admin|auditor|customer`
 
-### Артефакты организации, файлы и аудит
-- **`org_artifacts`**: связь “организация ↔ артефакт”
-  - **`org_id`** → `organizations.id`
-  - **`artifact_id`** → `artifacts.id`
-  - **`status`**: `missing|uploaded`
-  - **`current_file_version_id`** → `file_versions.id` (nullable)
-  - аудит проверки:
-    - **`audited_file_version_id`** → `file_versions.id` (nullable)
-    - **`audited_at`** (nullable)
-    - **`audited_by_user_id`** → `users.id` (nullable)
-  - изменения:
-    - **`created_at`**, **`updated_at`**
-    - **`updated_by_user_id`** → `users.id` (nullable)
-  - уникальность: `(org_id, artifact_id)`
-- **`file_versions`**: версии файла по `org_artifact`
-  - **`org_artifact_id`** → `org_artifacts.id`
-  - **`version_no`**: номер версии (уникален в рамках `org_artifact_id`)
-  - **`original_filename`**, **`content_type`**, **`size_bytes`**, **`sha256`**
-  - **`storage_backend`**: в MVP `postgres`
-  - **`storage_key`**: строковый ключ (nullable, используется для Nextcloud метки)
-  - **`blob`**: байты (nullable)
-  - **`created_at`**, **`created_by_user_id`** → `users.id` (nullable)
-- **`file_previews`**: кеш превью (например, PDF из office)
-  - **`file_version_id`** → `file_versions.id` (уникален)
-  - **`preview_mime`**, **`preview_size_bytes`**, **`preview_sha256`**, **`preview_blob`**
-  - **`last_error`**, **`last_error_at`**
-- **`org_artifact_comments`**: комментарии аудитора
-  - **`org_id`** → `organizations.id`
-  - **`org_artifact_id`** → `org_artifacts.id`
-  - **`author_user_id`** → `users.id` (nullable)
-  - **`comment_text`**, **`created_at`**
-- **`audit_log`**: журнал событий (кто/что/когда поменял)
-  - **`at`**, **`actor_user_id`**, **`org_id`**
-  - **`action`**, **`entity_type`**, **`entity_id`**
-  - **`before_json`**, **`after_json`** (JSONB)
-  - **`ip`**, **`user_agent`**
+#### `artifact_levels`, `artifact_level_items`
+- `artifact_levels` — L1/L2/L3 (порядок важен)
+- `artifact_level_items` — “дельта” уровня (эффективный набор = union уровней ≤ текущего)
 
-### Nextcloud (WebDAV)
-- **`nextcloud_integration_settings`**: текущие настройки интеграции
-  - **`is_enabled`**
-  - **`base_url`**, **`username`**, **`password`** (MVP: хранится в БД)
-  - **`root_folder`**
-  - **`create_orgs`**
-  - **`last_sync_at`**, **`last_error`**
-- **`nextcloud_remote_file_state`**: идемпотентность синхронизации
-  - **`org_id`** → `organizations.id`
-  - **`org_artifact_id`** → `org_artifacts.id`
-  - **`remote_path`**: уникален в рамках организации
-  - **`etag`**, **`size_bytes`**
-  - **`imported_file_version_id`** → `file_versions.id` (nullable)
-  - **`imported_at`**
+#### `org_artifacts`
+- `status`: `missing|uploaded` (наличие файла)
+- `review_status`: `pending|approved|needs_correction` (статус проверки)
+- аудитные поля: `audited_file_version_id`, `audited_at`, `audited_by_user_id`
+- “изменён после аудита” вычисляется как `current_file_version_id != audited_file_version_id` при наличии audited
 
-### Индекс КБ (шаблон в БД + ручные значения)
-- **`index_kb_template_rows`**: структура строк по листам (группы/пункты)
-  - **`sheet_name`**, **`sort_order`**
-  - **`kind`**: `group|item`
-  - **`row_key`**: стабильный идентификатор строки
-  - **`title`**, **`short_name`**, **`group_code`**
-  - уникальность: `(sheet_name, row_key)`
-- **`index_kb_manual_values`**: ручные значения (на организацию)
-  - **`org_id`** → `organizations.id`
-  - **`sheet_name`**, **`row_key`**
-  - **`value`** (0..5, может быть дробным)
-  - **`updated_at`**, **`updated_by_user_id`** → `users.id` (nullable)
-  - уникальность: `(org_id, sheet_name, row_key)`
+#### `file_versions`
+- версии файлов (Postgres blob в MVP), `version_no` уникален в рамках `org_artifact_id`
+
+#### `index_kb_template_rows`, `index_kb_manual_values`
+- шаблон Индекса КБ (группы/пункты по листам) и ручные значения (0..5)
+
+Примечание: “Индекс КБ” артефакты — это обычные `artifacts` с `artifact_key` вида `IKB:<sheet>:<row_key>` (создаются демо‑миграцией `0018_seed_kb_artifacts`).
 
 ## Миграции
-Используется Alembic. При старте контейнера `backend` автоматически выполняется:
+Используется Alembic. При старте контейнера `backend` выполняется:
 
 ```bash
 alembic upgrade head
 ```
 
-Файлы миграций: `backend/alembic/versions/`.
+Файлы: `backend/alembic/versions/`.
 
 ## Диагностика и частые проблемы
-### 1) Не вижу изменения в UI
-- сделайте **Ctrl+F5**
-- убедитесь, что пересоздан контейнер:
+### Не вижу изменения в UI
+- Сделайте **Ctrl+F5**
+- Пересоберите backend:
 
 ```bash
 docker compose up -d --build --force-recreate backend
 ```
 
-### 2) Порт 8000 занят “левым” процессом
-Проверьте кто слушает порт:
+### Порт 8000 занят
 
 ```powershell
 netstat -ano | findstr :8000
 ```
 
-### 3) Посмотреть логи backend
+### Логи backend
 
 ```bash
 docker compose logs --tail=200 backend
 ```
 
-### 4) Docker Desktop / context (Windows)
-Если `docker compose` пишет про `dockerDesktopLinuxEngine` / `pipe ... cannot find`:
-- убедитесь, что запущен Docker Desktop
-- проверьте контексты:
+### Docker Desktop / context (Windows)
+Если `docker compose` ругается на контекст/pipe:
 
 ```powershell
 docker context ls
@@ -364,7 +319,7 @@ docker info
 ```
 
 ## Безопасность (MVP‑заметки)
-- Пароли пользователей хранятся как `bcrypt`‑хэш (`passlib`).
+- Пароли хранятся как `bcrypt`‑хэш (`passlib`).
 - Авторизация через **JWT в HttpOnly cookie**.
-- Nextcloud пароль в MVP хранится в БД (рекомендуется использовать app‑password и/или секреты/ENV в проде).
+- Nextcloud пароль в MVP хранится в БД (рекомендуется app‑password и/или секреты/ENV в проде).
 
