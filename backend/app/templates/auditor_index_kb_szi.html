@@ -32,11 +32,13 @@
       {% endif %}
       {% if selected_org_id %}
         <a class="btn btn-secondary" href="{{ _base }}/index-kb/szi/export.xlsx?org_id={{ selected_org_id }}{% if date_from %}&date_from={{ date_from }}{% endif %}{% if date_to %}&date_to={{ date_to }}{% endif %}">Выгрузить Excel</a>
+        <a class="btn btn-secondary" href="{{ _base }}/dashboards?org_ids={{ selected_org_id }}">Дашборды</a>
         <a class="btn btn-secondary" href="{{ _base }}/index-kb?org_id={{ selected_org_id }}&sheet={{ sheet_name }}" title="Вернуться к основной странице Индекса КБ (Excel-вид)">Индекс КБ</a>
         <a class="btn btn-secondary" href="{{ _art }}?org_id={{ selected_org_id }}">Артефакты</a>
         <a class="btn btn-secondary" href="{{ _files }}?org_id={{ selected_org_id }}">Файлы</a>
       {% else %}
         <a class="btn btn-secondary" href="#" onclick="return false" style="pointer-events:none;opacity:.55" title="Выберите организацию">Выгрузить Excel</a>
+        <a class="btn btn-secondary" href="#" onclick="return false" style="pointer-events:none;opacity:.55" title="Выберите организацию">Дашборды</a>
         <a class="btn btn-secondary" href="#" onclick="return false" style="pointer-events:none;opacity:.55" title="Выберите организацию">Индекс КБ</a>
         <a class="btn btn-secondary" href="{{ _art }}">Артефакты</a>
         <a class="btn btn-secondary" href="{{ _files }}">Файлы</a>

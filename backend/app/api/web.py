@@ -4171,6 +4171,55 @@ def admin_dashboards_page(
     date_to: str | None = None,
     details_org_id: str | None = None,
 ) -> HTMLResponse:
+    # admin wrapper around shared dashboards renderer
+    return _dashboards_page_impl(
+        request=request,
+        db=db,
+        user=user,
+        date_from=date_from,
+        date_to=date_to,
+        details_org_id=details_org_id,
+        action_path="/admin/dashboards",
+        back_href="/admin",
+        back_label="В админку",
+    )
+
+
+@router.get("/auditor/dashboards", response_class=HTMLResponse)
+def auditor_dashboards_page(
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+    date_from: str | None = None,
+    date_to: str | None = None,
+    details_org_id: str | None = None,
+) -> HTMLResponse:
+    _require_admin_or_global_auditor(db, user)
+    return _dashboards_page_impl(
+        request=request,
+        db=db,
+        user=user,
+        date_from=date_from,
+        date_to=date_to,
+        details_org_id=details_org_id,
+        action_path="/auditor/dashboards",
+        back_href="/auditor/artifacts",
+        back_label="К аудиту",
+    )
+
+
+def _dashboards_page_impl(
+    *,
+    request: Request,
+    db: Session,
+    user: User,
+    date_from: str | None,
+    date_to: str | None,
+    details_org_id: str | None,
+    action_path: str,
+    back_href: str,
+    back_label: str,
+) -> HTMLResponse:
     # org selection: support multi-select via repeated query param org_ids=1&org_ids=2...
     raw_org_ids = list(request.query_params.getlist("org_ids"))
     if not raw_org_ids:
@@ -5040,6 +5089,9 @@ def admin_dashboards_page(
             "request": request,
             "user": user,
             "container_class": "container-wide",
+            "dashboards_action": action_path,
+            "dashboards_back_href": back_href,
+            "dashboards_back_label": back_label,
             "orgs": orgs,
             "selected_org_ids": selected_org_ids,
             "details_org_id": int(det_id) if det_id else None,

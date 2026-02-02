@@ -24,6 +24,7 @@
           <input type="date" name="date_to" value="{{ date_to or '' }}" style="width: 160px;" />
         </form>
       {% endif %}
+      <a class="btn btn-secondary" {% if selected_org_id %}href="{{ _base }}/dashboards?org_ids={{ selected_org_id }}"{% else %}aria-disabled="true"{% endif %}>Дашборды</a>
       <a class="btn btn-secondary" href="{% if selected_org_id %}{{ _art }}?org_id={{ selected_org_id }}{% else %}{{ _art }}{% endif %}">Артефакты</a>
       <a class="btn btn-secondary" href="{% if selected_org_id %}{{ _files }}?org_id={{ selected_org_id }}{% else %}{{ _files }}{% endif %}">Файлы</a>
       <a class="btn btn-secondary" href="/artifacts">Справочник</a>

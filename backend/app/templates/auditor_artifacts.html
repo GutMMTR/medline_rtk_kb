@@ -36,6 +36,7 @@
         </select>
       </form>
       <a class="btn btn-secondary" {% if selected_org_id %}href="/auditor/artifacts/export.xlsx?{{ export_query }}"{% else %}aria-disabled="true"{% endif %}>Выгрузить Excel</a>
+      <a class="btn btn-secondary" {% if selected_org_id %}href="/auditor/dashboards?org_ids={{ selected_org_id }}"{% else %}aria-disabled="true"{% endif %}>Дашборды</a>
       <a class="btn btn-secondary" {% if selected_org_id %}href="/auditor/index-kb?org_id={{ selected_org_id }}"{% else %}aria-disabled="true"{% endif %}>Индекс КБ</a>
       <a class="btn btn-secondary" {% if selected_org_id %}href="/auditor/files?org_id={{ selected_org_id }}"{% else %}aria-disabled="true"{% endif %}>Файлы</a>
       <a class="btn btn-secondary" href="/artifacts">Справочник</a>
