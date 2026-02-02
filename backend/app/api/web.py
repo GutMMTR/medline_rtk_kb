@@ -6,7 +6,7 @@ import os
 import time
 import subprocess
 import tempfile
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Dict, Tuple
 from urllib.parse import quote, urlencode
@@ -20,6 +20,7 @@ from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy import and_, func, insert, select
+import sqlalchemy as sa
 from sqlalchemy.orm import Session, aliased
 
 from app.audit.service import write_audit_log
@@ -30,7 +31,10 @@ import json
 
 from app.db.models import (
     Artifact,
+    ArtifactLevel,
+    ArtifactLevelItem,
     ArtifactNode,
+    AuditPeriod,
     AuditLog,
     FilePreview,
     FileVersion,
@@ -38,6 +42,7 @@ from app.db.models import (
     NextcloudRemoteFileState,
     OrgArtifact,
     OrgArtifactComment,
+    OrgArtifactReviewStatus,
     OrgArtifactStatus,
     Organization,
     Role,
@@ -93,6 +98,103 @@ def _filter_out_default_orgs(orgs: list[Organization]) -> list[Organization]:
     return [o for o in (orgs or []) if (o.name or "").strip() != DEFAULT_ORG_NAME]
 
 
+def _get_active_audit_periods(db: Session) -> list[AuditPeriod]:
+    return db.query(AuditPeriod).filter(AuditPeriod.is_active.is_(True)).order_by(AuditPeriod.sort_order.asc(), AuditPeriod.id.asc()).all()
+
+
+def _get_active_artifact_levels(db: Session) -> list[ArtifactLevel]:
+    return db.query(ArtifactLevel).filter(ArtifactLevel.is_active.is_(True)).order_by(ArtifactLevel.sort_order.asc(), ArtifactLevel.id.asc()).all()
+
+
+def _get_effective_artifact_ids_for_level(db: Session, *, level_id: int | None) -> list[int]:
+    """
+    Эффективный набор артефактов для уровня:
+    берём все items из уровней с sort_order <= выбранного уровня.
+    """
+    if not level_id:
+        return []
+    level = db.get(ArtifactLevel, int(level_id))
+    if not level:
+        return []
+    rows = (
+        db.query(ArtifactLevelItem.artifact_id)
+        .join(ArtifactLevel, ArtifactLevel.id == ArtifactLevelItem.level_id)
+        .filter(ArtifactLevel.sort_order <= level.sort_order)
+        .distinct()
+        .all()
+    )
+    return [int(aid) for (aid,) in rows if aid]
+
+
+def _get_effective_artifact_ids_for_level_code(db: Session, *, level_code: str | None) -> list[int]:
+    code = (level_code or "").strip().upper()
+    if not code:
+        return []
+    lvl = db.query(ArtifactLevel).filter(ArtifactLevel.code == code).one_or_none()
+    if not lvl:
+        return []
+    return _get_effective_artifact_ids_for_level(db, level_id=lvl.id)
+
+
+def _get_default_audit_period_id(db: Session) -> int | None:
+    ap = db.query(AuditPeriod).filter(AuditPeriod.code == "P365").one_or_none()
+    if ap:
+        return int(ap.id)
+    ap2 = db.query(AuditPeriod).filter(AuditPeriod.is_active.is_(True)).order_by(AuditPeriod.sort_order.asc(), AuditPeriod.id.asc()).first()
+    return int(ap2.id) if ap2 else None
+
+
+def _get_default_artifact_level_id(db: Session) -> int | None:
+    lvl = db.query(ArtifactLevel).filter(ArtifactLevel.code == "L3").one_or_none()
+    if lvl:
+        return int(lvl.id)
+    lvl2 = db.query(ArtifactLevel).filter(ArtifactLevel.is_active.is_(True)).order_by(ArtifactLevel.sort_order.asc(), ArtifactLevel.id.asc()).first()
+    return int(lvl2.id) if lvl2 else None
+
+
+def _get_org_period_bounds_utc(db: Session, *, org: Organization) -> tuple[datetime | None, datetime | None]:
+    """
+    Calendar period bounds for filtering uploads:
+    [date_from 00:00, date_to + 1 day 00:00) in UTC.
+    """
+    if not getattr(org, "audit_period_id", None):
+        return None, None
+    ap = db.get(AuditPeriod, int(org.audit_period_id))
+    if not ap:
+        return None, None
+    d1 = getattr(ap, "date_from", None)
+    d2 = getattr(ap, "date_to", None)
+    if not d1 or not d2:
+        return None, None
+    try:
+        start = datetime.combine(d1, datetime.min.time())
+        end = datetime.combine(d2, datetime.min.time()) + timedelta(days=1)
+        return start, end
+    except Exception:
+        return None, None
+
+
+def _get_period_bounds_utc(db: Session, *, period_id: int | None) -> tuple[AuditPeriod | None, datetime | None, datetime | None]:
+    """
+    Like _get_org_period_bounds_utc, but for an explicit period_id.
+    """
+    if not period_id:
+        return None, None, None
+    ap = db.get(AuditPeriod, int(period_id))
+    if not ap:
+        return None, None, None
+    d1 = getattr(ap, "date_from", None)
+    d2 = getattr(ap, "date_to", None)
+    if not d1 or not d2:
+        return ap, None, None
+    try:
+        start = datetime.combine(d1, datetime.min.time())
+        end = datetime.combine(d2, datetime.min.time()) + timedelta(days=1)
+        return ap, start, end
+    except Exception:
+        return ap, None, None
+
+
 def _fmt_dt(value: object) -> str:
     """
     Форматируем datetime для UI: делаем стабильный UTC+3 (MSK), т.к. в контейнере/браузере
@@ -112,6 +214,22 @@ def _fmt_dt(value: object) -> str:
 
 
 templates.env.filters["dt"] = _fmt_dt
+
+
+def _fmt_date(value: object) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, date):
+        return value.isoformat()
+    if isinstance(value, datetime):
+        try:
+            return value.date().isoformat()
+        except Exception:
+            return str(value)
+    return str(value)
+
+
+templates.env.filters["d"] = _fmt_date
 
 
 def _validate_password(password: str) -> str | None:
@@ -305,6 +423,8 @@ def my_artifacts_page(
     q: str | None = None,
     status: str | None = None,
     audit: str | None = None,
+    in_period: str | None = None,
+    period_id: int | None = None,
     page: int = 1,
     page_size: int = 50,
 ) -> HTMLResponse:
@@ -324,6 +444,11 @@ def my_artifacts_page(
     selected_org_id = org_id or orgs[0].id
     if selected_org_id not in {o.id for o in orgs}:
         selected_org_id = orgs[0].id
+    selected_org = next((o for o in orgs if o.id == selected_org_id), orgs[0])
+    in_period_flag = (in_period or "").strip().lower() in ("1", "true", "yes", "on")
+    periods_all = db.query(AuditPeriod).order_by(AuditPeriod.date_to.desc(), AuditPeriod.date_from.desc(), AuditPeriod.sort_order.asc(), AuditPeriod.id.desc()).all()
+    selected_period_id = int(period_id) if period_id else int(getattr(selected_org, "audit_period_id", 0) or 0)
+    selected_period, p_start, p_end = _get_period_bounds_utc(db, period_id=selected_period_id)
 
     page = max(int(page or 1), 1)
     page_size = int(page_size or 50)
@@ -337,6 +462,12 @@ def my_artifacts_page(
 
     # базовые фильтры (без статуса) — используем и для табличного вывода, и для расчёта процента заполненности
     filters = [OrgArtifact.org_id == selected_org_id]
+    # Ограничение по уровню (customer видит только свой effective-набор уровня организации).
+    if getattr(selected_org, "artifact_level_id", None):
+        allowed_artifact_ids = _get_effective_artifact_ids_for_level(db, level_id=int(selected_org.artifact_level_id))
+        filters.append(OrgArtifact.artifact_id.in_(allowed_artifact_ids))
+    # Календарный период аудита: опциональный фильтр "только загруженные в выбранный период".
+    period_active = bool(p_start and p_end and in_period_flag)
     if topic:
         filters.append(Artifact.topic == topic)
     if domain:
@@ -355,6 +486,20 @@ def my_artifacts_page(
         )
 
     base_count_q = db.query(OrgArtifact.id).join(Artifact, Artifact.id == OrgArtifact.artifact_id).filter(*filters)
+    PeriodFv = aliased(FileVersion)
+    period_sub = None
+    if p_start and p_end:
+        period_sub = (
+            db.query(
+                PeriodFv.org_artifact_id.label("oa_id"),
+                func.max(PeriodFv.id).label("fv_id"),
+            )
+            .filter(PeriodFv.created_at >= p_start, PeriodFv.created_at < p_end)
+            .group_by(PeriodFv.org_artifact_id)
+            .subquery()
+        )
+    if period_active and period_sub is not None:
+        base_count_q = base_count_q.join(period_sub, period_sub.c.oa_id == OrgArtifact.id).filter(period_sub.c.fv_id.isnot(None))
 
     completion_total = base_count_q.count()
     completion_uploaded = base_count_q.filter(OrgArtifact.status == OrgArtifactStatus.uploaded).count()
@@ -370,19 +515,26 @@ def my_artifacts_page(
     total = list_count_q.count()
 
     audit_filter = (audit or "").strip().lower() or ""
-    if audit_filter not in ("needs", "audited", "changed", ""):
+    if audit_filter not in ("needs", "audited", "changed", "needs_correction", ""):
         audit_filter = ""
     if audit_filter:
         if audit_filter == "needs":
             list_count_q = list_count_q.filter(
                 OrgArtifact.current_file_version_id.isnot(None),
                 OrgArtifact.audited_file_version_id.is_(None),
+                OrgArtifact.review_status == OrgArtifactReviewStatus.pending,
+            )
+        elif audit_filter == "needs_correction":
+            list_count_q = list_count_q.filter(
+                OrgArtifact.current_file_version_id.isnot(None),
+                OrgArtifact.review_status == OrgArtifactReviewStatus.needs_correction,
             )
         elif audit_filter == "audited":
             list_count_q = list_count_q.filter(
                 OrgArtifact.current_file_version_id.isnot(None),
                 OrgArtifact.audited_file_version_id.isnot(None),
                 OrgArtifact.audited_file_version_id == OrgArtifact.current_file_version_id,
+                OrgArtifact.review_status == OrgArtifactReviewStatus.approved,
             )
         elif audit_filter == "changed":
             list_count_q = list_count_q.filter(
@@ -410,24 +562,51 @@ def my_artifacts_page(
         .subquery()
     )
 
-    query = (
-        db.query(
-            OrgArtifact,
-            Artifact,
-            FileVersion,
-            latest_comment.c.comment_text,
-            latest_comment.c.created_at,
-            CommentBy,
-            AuditedBy,
+    PeriodFvJoin = aliased(FileVersion)
+    if period_sub is not None:
+        query = (
+            db.query(
+                OrgArtifact,
+                Artifact,
+                FileVersion,
+                PeriodFvJoin,
+                latest_comment.c.comment_text,
+                latest_comment.c.created_at,
+                CommentBy,
+                AuditedBy,
+            )
+            .join(Artifact, Artifact.id == OrgArtifact.artifact_id)
+            .outerjoin(FileVersion, FileVersion.id == OrgArtifact.current_file_version_id)
+            .outerjoin(period_sub, period_sub.c.oa_id == OrgArtifact.id)
+            .outerjoin(PeriodFvJoin, PeriodFvJoin.id == period_sub.c.fv_id)
+            .outerjoin(latest_comment, latest_comment.c.org_artifact_id == OrgArtifact.id)
+            .outerjoin(CommentBy, CommentBy.id == latest_comment.c.author_user_id)
+            .outerjoin(AuditedBy, AuditedBy.id == OrgArtifact.audited_by_user_id)
+            .filter(*filters)
+            .order_by(Artifact.topic.asc(), Artifact.domain.asc(), Artifact.short_name.asc(), Artifact.achievement_item_no.asc().nullsfirst())
         )
-        .join(Artifact, Artifact.id == OrgArtifact.artifact_id)
-        .outerjoin(FileVersion, FileVersion.id == OrgArtifact.current_file_version_id)
-        .outerjoin(latest_comment, latest_comment.c.org_artifact_id == OrgArtifact.id)
-        .outerjoin(CommentBy, CommentBy.id == latest_comment.c.author_user_id)
-        .outerjoin(AuditedBy, AuditedBy.id == OrgArtifact.audited_by_user_id)
-        .filter(*filters)
-        .order_by(Artifact.topic.asc(), Artifact.domain.asc(), Artifact.short_name.asc(), Artifact.achievement_item_no.asc().nullsfirst())
-    )
+        if period_active:
+            query = query.filter(period_sub.c.fv_id.isnot(None))
+    else:
+        query = (
+            db.query(
+                OrgArtifact,
+                Artifact,
+                FileVersion,
+                sa.literal(None).label("fv_period"),
+                latest_comment.c.comment_text,
+                latest_comment.c.created_at,
+                CommentBy,
+                AuditedBy,
+            )
+            .join(Artifact, Artifact.id == OrgArtifact.artifact_id)
+            .outerjoin(FileVersion, FileVersion.id == OrgArtifact.current_file_version_id)
+            .outerjoin(latest_comment, latest_comment.c.org_artifact_id == OrgArtifact.id)
+            .outerjoin(CommentBy, CommentBy.id == latest_comment.c.author_user_id)
+            .outerjoin(AuditedBy, AuditedBy.id == OrgArtifact.audited_by_user_id)
+            .filter(*filters)
+            .order_by(Artifact.topic.asc(), Artifact.domain.asc(), Artifact.short_name.asc(), Artifact.achievement_item_no.asc().nullsfirst())
+        )
     if status_filter:
         query = query.filter(OrgArtifact.status == OrgArtifactStatus(status_filter))
     if audit_filter:
@@ -435,12 +614,19 @@ def my_artifacts_page(
             query = query.filter(
                 OrgArtifact.current_file_version_id.isnot(None),
                 OrgArtifact.audited_file_version_id.is_(None),
+                OrgArtifact.review_status == OrgArtifactReviewStatus.pending,
+            )
+        elif audit_filter == "needs_correction":
+            query = query.filter(
+                OrgArtifact.current_file_version_id.isnot(None),
+                OrgArtifact.review_status == OrgArtifactReviewStatus.needs_correction,
             )
         elif audit_filter == "audited":
             query = query.filter(
                 OrgArtifact.current_file_version_id.isnot(None),
                 OrgArtifact.audited_file_version_id.isnot(None),
                 OrgArtifact.audited_file_version_id == OrgArtifact.current_file_version_id,
+                OrgArtifact.review_status == OrgArtifactReviewStatus.approved,
             )
         elif audit_filter == "changed":
             query = query.filter(
@@ -451,12 +637,20 @@ def my_artifacts_page(
 
     offset = (page - 1) * page_size
     rows = []
-    for (oa, a, fv, c_text, c_at, c_by, audited_by) in query.offset(offset).limit(page_size).all():
+    for (oa, a, fv, fv_period, c_text, c_at, c_by, audited_by) in query.offset(offset).limit(page_size).all():
         # UI-friendly audit badge (prevents template drift)
+        review = (getattr(oa, "review_status", None).value if getattr(oa, "review_status", None) else "")
         if not oa.current_file_version_id:
             audit_label = "—"
             audit_class = "badge badge-neutral"
-        elif oa.audited_file_version_id and oa.audited_file_version_id == oa.current_file_version_id:
+        elif review == OrgArtifactReviewStatus.needs_correction.value:
+            audit_label = "Требует корректировки"
+            audit_class = "badge badge-danger"
+        elif (
+            review == OrgArtifactReviewStatus.approved.value
+            and oa.audited_file_version_id
+            and oa.audited_file_version_id == oa.current_file_version_id
+        ):
             audit_label = "Проаудировано"
             audit_class = "badge badge-info"
         elif oa.audited_file_version_id:
@@ -471,6 +665,7 @@ def my_artifacts_page(
                 "oa": oa,
                 "a": a,
                 "fv": fv,
+                "fv_period": fv_period,
                 "comment_text": c_text or "",
                 "comment_at": c_at,
                 "comment_by": c_by.login if c_by else "",
@@ -500,6 +695,8 @@ def my_artifacts_page(
             "q": q or "",
             "status": status_filter,
             "audit": audit_filter,
+            "in_period": ("1" if in_period_flag else ""),
+            "period_id": str(selected_period_id or ""),
             "page_size": str(page_size),
         }
     )
@@ -517,7 +714,7 @@ def my_artifacts_page(
             "user": user,
             "container_class": "container-wide",
             "orgs": orgs,
-            "org_name": next((o.name for o in orgs if o.id == selected_org_id), orgs[0].name),
+            "org_name": selected_org.name,
             "selected_org_id": selected_org_id,
             "rows": rows,
             "max_upload_mb": settings.max_upload_mb,
@@ -528,6 +725,11 @@ def my_artifacts_page(
             "q": q,
             "status": status_filter,
             "audit": audit_filter,
+            "in_period": in_period_flag,
+            "periods": periods_all,
+            "selected_period_id": selected_period_id,
+            "org_period": selected_period,
+            "org_level": selected_org.artifact_level,
             "topics": topics,
             "domains": domains,
             "kb_levels": kb_levels,
@@ -605,7 +807,11 @@ def my_files_explorer(
         .join(sub, and_(OrgArtifactComment.org_artifact_id == sub.c.oa_id, OrgArtifactComment.created_at == sub.c.max_created_at))
         .subquery()
     )
-    rows = (
+    allowed_artifact_ids: list[int] | None = None
+    if getattr(org, "artifact_level_id", None):
+        allowed_artifact_ids = _get_effective_artifact_ids_for_level(db, level_id=int(org.artifact_level_id))
+
+    q_rows = (
         db.query(
             OrgArtifact,
             Artifact,
@@ -625,8 +831,17 @@ def my_files_explorer(
         .outerjoin(CommentBy, CommentBy.id == latest_comment.c.author_user_id)
         .outerjoin(AuditedBy, AuditedBy.id == OrgArtifact.audited_by_user_id)
         .filter(OrgArtifact.org_id == org.id)
-        .all()
     )
+    if allowed_artifact_ids is not None:
+        q_rows = q_rows.filter(OrgArtifact.artifact_id.in_(allowed_artifact_ids))
+    p_start, p_end = _get_org_period_bounds_utc(db, org=org)
+    if p_start and p_end:
+        q_rows = q_rows.filter(
+            OrgArtifact.current_file_version_id.isnot(None),
+            FileVersion.created_at >= p_start,
+            FileVersion.created_at < p_end,
+        )
+    rows = q_rows.all()
 
     # Нормализуем path: "ВССТ/КМНК/1" -> ["ВССТ","КМНК","1"]
     path = (path or "").strip().strip("/")
@@ -645,10 +860,18 @@ def my_files_explorer(
             nxt = segs[len(cur_segments)]
             subfolders[nxt] = subfolders.get(nxt, 0) + 1
         else:
+            review = (getattr(oa, "review_status", None).value if getattr(oa, "review_status", None) else "")
             if not oa.current_file_version_id:
                 audit_label = "—"
                 audit_class = "badge badge-neutral"
-            elif oa.audited_file_version_id and oa.audited_file_version_id == oa.current_file_version_id:
+            elif review == OrgArtifactReviewStatus.needs_correction.value:
+                audit_label = "Требует корректировки"
+                audit_class = "badge badge-danger"
+            elif (
+                review == OrgArtifactReviewStatus.approved.value
+                and oa.audited_file_version_id
+                and oa.audited_file_version_id == oa.current_file_version_id
+            ):
                 audit_label = "Проаудировано"
                 audit_class = "badge badge-info"
             elif oa.audited_file_version_id:
@@ -712,6 +935,7 @@ def my_index_kb_page(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
     org_id: int | None = None,
+    period_id: int | None = None,
     sheet: str | None = None,
     q: str | None = None,
 ) -> HTMLResponse:
@@ -735,6 +959,8 @@ def my_index_kb_page(
         return resp
 
     selected_org_id = org.id
+    periods = db.query(AuditPeriod).order_by(AuditPeriod.date_to.desc(), AuditPeriod.date_from.desc(), AuditPeriod.sort_order.asc(), AuditPeriod.id.desc()).all()
+    selected_period_id = int(period_id) if period_id else int(getattr(org, "audit_period_id", 0) or 0)
     available_sheets: list[str] = []
     if get_uib_template_from_db(db):
         available_sheets.append(UIB_SHEET_NAME)
@@ -749,6 +975,8 @@ def my_index_kb_page(
             "container_class": "container-wide",
             "orgs": orgs,
             "selected_org_id": selected_org_id,
+            "periods": periods,
+            "selected_period_id": selected_period_id,
             "sheet_names": INDEX_KB_SHEET_TILES,
             "available_sheets": available_sheets,
             "error": err,
@@ -769,6 +997,7 @@ def my_index_kb_uib_page(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
     org_id: int | None = None,
+    period_id: int | None = None,
 ) -> HTMLResponse:
     orgs, org = _get_customer_selected_org(db, user, org_id)
     if len(orgs) > 1 and not org_id:
@@ -789,6 +1018,8 @@ def my_index_kb_uib_page(
         return resp
 
     selected_org_id = org.id
+    periods = db.query(AuditPeriod).order_by(AuditPeriod.date_to.desc(), AuditPeriod.date_from.desc(), AuditPeriod.sort_order.asc(), AuditPeriod.id.desc()).all()
+    selected_period_id = int(period_id) if period_id else int(getattr(org, "audit_period_id", 0) or 0)
     if not get_uib_template_from_db(db):
         resp = templates.TemplateResponse(
             "auditor_index_kb_uib.html",
@@ -815,7 +1046,7 @@ def my_index_kb_uib_page(
         resp.headers["Pragma"] = "no-cache"
         return resp
 
-    org_obj, tpl, rows = build_uib_view(db, org_id=selected_org_id, actor=user)
+    org_obj, tpl, rows = build_uib_view(db, org_id=selected_org_id, actor=user, period_id=selected_period_id or None)
     from app.index_kb.uib_sheet import compute_uib_summary
 
     summary_rows = compute_uib_summary(rows)
@@ -837,6 +1068,8 @@ def my_index_kb_uib_page(
             "artifacts_base": "/my/artifacts",
             "show_org_selector": len(orgs) > 1,
             "readonly": True,
+            "periods": periods,
+            "selected_period_id": selected_period_id,
         },
     )
     resp.headers["Cache-Control"] = "no-store, max-age=0"
@@ -878,11 +1111,14 @@ def auditor_artifacts_page(
     short_name: str | None = None,
     q: str | None = None,
     status: str | None = None,
+    level: str | None = None,
+    in_period: str | None = None,
     page: int = 1,
     page_size: int = 50,
 ) -> HTMLResponse:
     # только auditor/admin
     orgs = _get_accessible_orgs_for_auditor(db, user)
+    levels = _get_active_artifact_levels(db)
     if not orgs:
         return templates.TemplateResponse(
             "empty.html",
@@ -908,6 +1144,8 @@ def auditor_artifacts_page(
                 "short_name": short_name,
                 "q": q,
                 "status": status,
+                "level": level,
+                "levels": levels,
                 "topics": [],
                 "domains": [],
                 "kb_levels": [],
@@ -926,12 +1164,15 @@ def auditor_artifacts_page(
                 "completion_pct": 0,
                 "current_url": request.url.path,
                 "can_delete_files": False,
+                "org_period": None,
+                "org_level": None,
             },
         )
         resp.headers["Cache-Control"] = "no-store, max-age=0"
         resp.headers["Pragma"] = "no-cache"
         return resp
     selected_org_id = org_id
+    org = db.get(Organization, selected_org_id)
     role = get_user_role_for_org(db, user, selected_org_id)
     if role not in (Role.auditor, Role.admin):
         raise HTTPException(status_code=403, detail="Требуются права auditor/admin")
@@ -969,6 +1210,23 @@ def auditor_artifacts_page(
     )
 
     filters = [OrgArtifact.org_id == selected_org_id]
+    in_period_flag = (in_period or "").strip().lower() in ("1", "true", "yes", "on")
+    # Календарный период организации: опционально фильтруем "только загруженные в период".
+    if org:
+        p_start, p_end = _get_org_period_bounds_utc(db, org=org)
+        period_active = bool(p_start and p_end and in_period_flag)
+    else:
+        p_start, p_end = None, None
+        period_active = False
+    # Фильтр уровня (для аудитора): показываем effective-набор выбранного уровня.
+    level_filter = (level or "").strip().upper()
+    if level_filter:
+        allowed_artifact_ids = _get_effective_artifact_ids_for_level_code(db, level_code=level_filter)
+        if allowed_artifact_ids:
+            filters.append(OrgArtifact.artifact_id.in_(allowed_artifact_ids))
+        else:
+            # неизвестный уровень -> показываем пусто
+            filters.append(OrgArtifact.id == -1)
     if topic:
         filters.append(Artifact.topic == topic)
     if domain:
@@ -987,12 +1245,19 @@ def auditor_artifacts_page(
         )
 
     base_count_q = db.query(OrgArtifact.id).join(Artifact, Artifact.id == OrgArtifact.artifact_id).filter(*filters)
+    if period_active:
+        base_count_q = base_count_q.filter(OrgArtifact.current_file_version_id.isnot(None)).join(
+            FileVersion, FileVersion.id == OrgArtifact.current_file_version_id
+        ).filter(
+            FileVersion.created_at >= p_start,
+            FileVersion.created_at < p_end,
+        )
     completion_total = base_count_q.count()
     completion_uploaded = base_count_q.filter(OrgArtifact.status == OrgArtifactStatus.uploaded).count()
     completion_pct = int(round((completion_uploaded * 100.0 / completion_total), 0)) if completion_total else 0
 
     status_filter = (status or "").strip().lower() or ""
-    if status_filter not in ("uploaded", "missing", "changed", "audited", ""):
+    if status_filter not in ("uploaded", "missing", "changed", "audited", "needs_correction", ""):
         status_filter = ""
 
     list_count_q = base_count_q
@@ -1006,12 +1271,20 @@ def auditor_artifacts_page(
                     OrgArtifact.status == OrgArtifactStatus.uploaded,
                     OrgArtifact.current_file_version_id.isnot(None),
                     OrgArtifact.audited_file_version_id.is_(None),
+                    OrgArtifact.review_status == OrgArtifactReviewStatus.pending,
                 )
+        elif status_filter == "needs_correction":
+            list_count_q = list_count_q.filter(
+                OrgArtifact.status == OrgArtifactStatus.uploaded,
+                OrgArtifact.current_file_version_id.isnot(None),
+                OrgArtifact.review_status == OrgArtifactReviewStatus.needs_correction,
+            )
         elif status_filter == "audited":
             list_count_q = list_count_q.filter(
                 OrgArtifact.current_file_version_id.isnot(None),
                 OrgArtifact.audited_file_version_id.isnot(None),
                 OrgArtifact.audited_file_version_id == OrgArtifact.current_file_version_id,
+                OrgArtifact.review_status == OrgArtifactReviewStatus.approved,
             )
         elif status_filter == "changed":
             list_count_q = list_count_q.filter(
@@ -1032,6 +1305,12 @@ def auditor_artifacts_page(
         .filter(*filters)
         .order_by(Artifact.topic.asc(), Artifact.domain.asc(), Artifact.short_name.asc(), Artifact.achievement_item_no.asc().nullsfirst())
     )
+    if period_active:
+        query = query.filter(
+            OrgArtifact.current_file_version_id.isnot(None),
+            FileVersion.created_at >= p_start,
+            FileVersion.created_at < p_end,
+        )
     if status_filter:
         if status_filter in ("missing", "uploaded"):
             if status_filter == "missing":
@@ -1041,12 +1320,20 @@ def auditor_artifacts_page(
                     OrgArtifact.status == OrgArtifactStatus.uploaded,
                     OrgArtifact.current_file_version_id.isnot(None),
                     OrgArtifact.audited_file_version_id.is_(None),
+                    OrgArtifact.review_status == OrgArtifactReviewStatus.pending,
                 )
+        elif status_filter == "needs_correction":
+            query = query.filter(
+                OrgArtifact.status == OrgArtifactStatus.uploaded,
+                OrgArtifact.current_file_version_id.isnot(None),
+                OrgArtifact.review_status == OrgArtifactReviewStatus.needs_correction,
+            )
         elif status_filter == "audited":
             query = query.filter(
                 OrgArtifact.current_file_version_id.isnot(None),
                 OrgArtifact.audited_file_version_id.isnot(None),
                 OrgArtifact.audited_file_version_id == OrgArtifact.current_file_version_id,
+                OrgArtifact.review_status == OrgArtifactReviewStatus.approved,
             )
         elif status_filter == "changed":
             query = query.filter(
@@ -1085,6 +1372,8 @@ def auditor_artifacts_page(
             "short_name": short_name or "",
             "q": q or "",
             "status": status_filter,
+            "level": level_filter,
+            "in_period": ("1" if in_period_flag else ""),
             "page_size": str(page_size),
         }
     )
@@ -1097,6 +1386,8 @@ def auditor_artifacts_page(
             "short_name": short_name or "",
             "q": q or "",
             "status": status_filter,
+            "level": level_filter,
+            "in_period": ("1" if in_period_flag else ""),
         }
     )
     window = 3
@@ -1121,6 +1412,9 @@ def auditor_artifacts_page(
             "short_name": short_name,
             "q": q,
             "status": status_filter,
+            "level": level_filter,
+            "in_period": in_period_flag,
+            "levels": levels,
             "topics": topics,
             "domains": domains,
             "kb_levels": kb_levels,
@@ -1136,6 +1430,8 @@ def auditor_artifacts_page(
             "base_query": base_query,
             "page_links": page_links,
             "export_query": export_query,
+            "org_period": org.audit_period if org else None,
+            "org_level": org.artifact_level if org else None,
         },
     )
     resp.headers["Cache-Control"] = "no-store, max-age=0"
@@ -1211,6 +1507,7 @@ def auditor_mark_audited(
     oa.audited_file_version_id = oa.current_file_version_id
     oa.audited_at = now
     oa.audited_by_user_id = user.id
+    oa.review_status = OrgArtifactReviewStatus.approved
     oa.updated_at = now
     oa.updated_by_user_id = user.id
 
@@ -1219,6 +1516,7 @@ def auditor_mark_audited(
         "audited_at": oa.audited_at.isoformat() if oa.audited_at else None,
         "audited_by_user_id": oa.audited_by_user_id,
         "current_file_version_id": oa.current_file_version_id,
+        "review_status": oa.review_status.value,
     }
 
     write_audit_log(
@@ -1226,6 +1524,76 @@ def auditor_mark_audited(
         actor=user,
         org_id=oa.org_id,
         action="audit",
+        entity_type="org_artifact",
+        entity_id=str(oa.id),
+        before=before,
+        after=after,
+        request=request,
+    )
+    db.commit()
+
+    ref = (back or "").strip() or (request.headers.get("referer") or "")
+    if not ref or "://" in ref or not ref.startswith("/"):
+        ref = f"/auditor/artifacts?org_id={oa.org_id}"
+    return _redirect(ref)
+
+
+@router.post("/auditor/org_artifacts/{org_artifact_id}/needs_correction")
+def auditor_mark_needs_correction(
+    org_artifact_id: int,
+    request: Request,
+    comment: str = Form(""),
+    back: str = Form(""),
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> Response:
+    oa = db.get(OrgArtifact, org_artifact_id)
+    if not oa:
+        raise HTTPException(status_code=404, detail="Артефакт организации не найден")
+    role = get_user_role_for_org(db, user, oa.org_id)
+    if role not in (Role.auditor, Role.admin):
+        raise HTTPException(status_code=403, detail="Требуются права auditor/admin")
+    if not oa.current_file_version_id:
+        raise HTTPException(status_code=400, detail="Нет файла для возврата на корректировку")
+
+    txt = (comment or "").strip()
+    if not txt:
+        raise HTTPException(status_code=400, detail="Комментарий обязателен")
+
+    now = datetime.utcnow()
+    before = {
+        "review_status": getattr(oa, "review_status", None).value if getattr(oa, "review_status", None) else None,
+        "audited_file_version_id": oa.audited_file_version_id,
+        "audited_at": oa.audited_at.isoformat() if oa.audited_at else None,
+        "audited_by_user_id": oa.audited_by_user_id,
+        "current_file_version_id": oa.current_file_version_id,
+    }
+
+    # 1) сохранить комментарий аудитора
+    db.add(OrgArtifactComment(org_id=oa.org_id, org_artifact_id=oa.id, author_user_id=user.id, comment_text=txt))
+
+    # 2) поставить статус "Требует корректировки" + сбросить audit поля (чтобы не считалось проаудированным)
+    oa.review_status = OrgArtifactReviewStatus.needs_correction
+    oa.audited_file_version_id = None
+    oa.audited_at = None
+    oa.audited_by_user_id = None
+    oa.updated_at = now
+    oa.updated_by_user_id = user.id
+
+    after = {
+        "review_status": oa.review_status.value,
+        "audited_file_version_id": oa.audited_file_version_id,
+        "audited_at": oa.audited_at,
+        "audited_by_user_id": oa.audited_by_user_id,
+        "current_file_version_id": oa.current_file_version_id,
+        "comment": txt,
+    }
+
+    write_audit_log(
+        db,
+        actor=user,
+        org_id=oa.org_id,
+        action="audit_needs_correction",
         entity_type="org_artifact",
         entity_id=str(oa.id),
         before=before,
@@ -1254,6 +1622,7 @@ def auditor_artifacts_export_xlsx(
     q: str | None = None,
     status: str | None = None,
     audit_status: str | None = None,
+    level: str | None = None,
 ) -> Response:
     if not org_id:
         raise HTTPException(status_code=400, detail="org_id обязателен")
@@ -1263,6 +1632,9 @@ def auditor_artifacts_export_xlsx(
 
     _ensure_org_artifacts_materialized(db, org_id)
     db.commit()
+
+    org = db.get(Organization, org_id)
+    p_start, p_end = _get_org_period_bounds_utc(db, org=org) if org else (None, None)
 
     CreatedBy = aliased(User)
     UpdatedBy = aliased(User)
@@ -1309,6 +1681,19 @@ def auditor_artifacts_export_xlsx(
         .filter(OrgArtifact.org_id == org_id)
         .order_by(Artifact.topic.asc(), Artifact.domain.asc(), Artifact.short_name.asc(), Artifact.achievement_item_no.asc().nullsfirst())
     )
+    if p_start and p_end:
+        query = query.filter(
+            OrgArtifact.current_file_version_id.isnot(None),
+            FileVersion.created_at >= p_start,
+            FileVersion.created_at < p_end,
+        )
+    level_filter = (level or "").strip().upper()
+    if level_filter:
+        allowed_artifact_ids = _get_effective_artifact_ids_for_level_code(db, level_code=level_filter)
+        if allowed_artifact_ids:
+            query = query.filter(OrgArtifact.artifact_id.in_(allowed_artifact_ids))
+        else:
+            query = query.filter(OrgArtifact.id == -1)
     if topic:
         query = query.filter(Artifact.topic == topic)
     if domain:
@@ -1331,9 +1716,9 @@ def auditor_artifacts_export_xlsx(
         query = query.filter(Artifact.indicator_name.ilike(like_i))
 
     # Фильтр по статусу аудирования (как на /auditor/artifacts):
-    # missing / uploaded(==needs audit) / changed / audited
+    # missing / uploaded(==needs audit) / needs_correction / changed / audited
     audit_filter = (audit_status or status or "").strip().lower() or ""
-    if audit_filter not in ("uploaded", "missing", "changed", "audited", ""):
+    if audit_filter not in ("uploaded", "missing", "changed", "audited", "needs_correction", ""):
         audit_filter = ""
     if audit_filter:
         if audit_filter in ("missing", "uploaded"):
@@ -1344,12 +1729,20 @@ def auditor_artifacts_export_xlsx(
                     OrgArtifact.status == OrgArtifactStatus.uploaded,
                     OrgArtifact.current_file_version_id.isnot(None),
                     OrgArtifact.audited_file_version_id.is_(None),
+                    OrgArtifact.review_status == OrgArtifactReviewStatus.pending,
                 )
+        elif audit_filter == "needs_correction":
+            query = query.filter(
+                OrgArtifact.status == OrgArtifactStatus.uploaded,
+                OrgArtifact.current_file_version_id.isnot(None),
+                OrgArtifact.review_status == OrgArtifactReviewStatus.needs_correction,
+            )
         elif audit_filter == "audited":
             query = query.filter(
                 OrgArtifact.current_file_version_id.isnot(None),
                 OrgArtifact.audited_file_version_id.isnot(None),
                 OrgArtifact.audited_file_version_id == OrgArtifact.current_file_version_id,
+                OrgArtifact.review_status == OrgArtifactReviewStatus.approved,
             )
         elif audit_filter == "changed":
             query = query.filter(
@@ -1358,7 +1751,6 @@ def auditor_artifacts_export_xlsx(
                 OrgArtifact.audited_file_version_id != OrgArtifact.current_file_version_id,
             )
 
-    org = db.get(Organization, org_id)
     org_name = org.name if org else f"org_{org_id}"
 
     wb = Workbook()
@@ -1396,7 +1788,13 @@ def auditor_artifacts_export_xlsx(
     def audit_status_label(oa: OrgArtifact) -> str:
         if not oa.current_file_version_id:
             return "Нет файла"
-        if oa.audited_file_version_id and oa.audited_file_version_id == oa.current_file_version_id:
+        if getattr(oa, "review_status", None) == OrgArtifactReviewStatus.needs_correction:
+            return "Требует корректировки"
+        if (
+            getattr(oa, "review_status", None) == OrgArtifactReviewStatus.approved
+            and oa.audited_file_version_id
+            and oa.audited_file_version_id == oa.current_file_version_id
+        ):
             return "Проаудировано"
         if oa.audited_file_version_id:
             return "Изменён"
@@ -1474,6 +1872,7 @@ def auditor_artifacts_export_xlsx(
                 "q": q,
                 "status": status,
                 "audit_status": audit_status,
+                "level": level_filter or (level or ""),
             },
         },
         request=request,
@@ -1671,17 +2070,26 @@ def auditor_files_explorer(
     _ensure_org_artifacts_materialized(db, selected_org_id)
     db.commit()
 
+    org = db.get(Organization, selected_org_id)
+    p_start, p_end = _get_org_period_bounds_utc(db, org=org) if org else (None, None)
+
     CreatedBy = aliased(User)
     UpdatedBy = aliased(User)
-    rows = (
+    q_rows = (
         db.query(OrgArtifact, Artifact, FileVersion, CreatedBy, UpdatedBy)
         .join(Artifact, Artifact.id == OrgArtifact.artifact_id)
         .outerjoin(FileVersion, FileVersion.id == OrgArtifact.current_file_version_id)
         .outerjoin(CreatedBy, CreatedBy.id == FileVersion.created_by_user_id)
         .outerjoin(UpdatedBy, UpdatedBy.id == OrgArtifact.updated_by_user_id)
         .filter(OrgArtifact.org_id == selected_org_id)
-        .all()
     )
+    if p_start and p_end:
+        q_rows = q_rows.filter(
+            OrgArtifact.current_file_version_id.isnot(None),
+            FileVersion.created_at >= p_start,
+            FileVersion.created_at < p_end,
+        )
+    rows = q_rows.all()
 
     path = (path or "").strip().strip("/")
     cur_segments = [p for p in path.split("/") if p] if path else []
@@ -1745,6 +2153,7 @@ def auditor_index_kb_page(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
     org_id: int | None = None,
+    period_id: int | None = None,
     sheet: str | None = None,
     q: str | None = None,
 ) -> HTMLResponse:
@@ -1766,6 +2175,14 @@ def auditor_index_kb_page(
         # No org selected (or invalid org_id) — show tiles, highlight picker.
         org_picker_error = True
 
+    periods = db.query(AuditPeriod).order_by(AuditPeriod.date_to.desc(), AuditPeriod.date_from.desc(), AuditPeriod.sort_order.asc(), AuditPeriod.id.desc()).all()
+    selected_period_id = None
+    if selected_org_id:
+        o = db.get(Organization, int(selected_org_id))
+        selected_period_id = int(period_id) if period_id else int(getattr(o, "audit_period_id", 0) or 0)
+    else:
+        selected_period_id = int(period_id) if period_id else (int(periods[0].id) if periods else None)
+
     available_sheets: list[str] = []
     if get_uib_template_from_db(db):
         available_sheets.append(UIB_SHEET_NAME)
@@ -1781,6 +2198,8 @@ def auditor_index_kb_page(
             "container_class": "container-wide",
             "orgs": orgs,
             "selected_org_id": selected_org_id,
+            "periods": periods,
+            "selected_period_id": selected_period_id,
             "sheet_names": INDEX_KB_SHEET_TILES,
             "available_sheets": available_sheets,
             "error": err,
@@ -1802,6 +2221,7 @@ def auditor_index_kb_uib_page(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
     org_id: int | None = None,
+    period_id: int | None = None,
 ) -> HTMLResponse:
     orgs_all = _get_accessible_orgs_for_auditor(db, user)
     orgs = orgs_all
@@ -1818,6 +2238,15 @@ def auditor_index_kb_uib_page(
         _require_auditor_or_admin_for_org(db, user, selected_org_id)
     else:
         org_picker_error = True
+
+    periods = db.query(AuditPeriod).order_by(AuditPeriod.date_to.desc(), AuditPeriod.date_from.desc(), AuditPeriod.sort_order.asc(), AuditPeriod.id.desc()).all()
+    selected_period_id: int | None = int(period_id) if period_id else None
+    if selected_period_id is None and selected_org_id:
+        o = db.get(Organization, int(selected_org_id))
+        if o and getattr(o, "audit_period_id", None):
+            selected_period_id = int(o.audit_period_id)
+    if selected_period_id is None and periods:
+        selected_period_id = int(periods[0].id)
 
     # Cache full view for snappy reloads. Keyed by (org_id, template_rev).
     global _UIB_VIEW_CACHE
@@ -1858,13 +2287,13 @@ def auditor_index_kb_uib_page(
             return resp
 
         tpl_rev = get_uib_template_rev(db)
-        cache_key = (int(selected_org_id), int(tpl_rev))
+        cache_key = (int(selected_org_id), int(tpl_rev), int(selected_period_id or 0))
         now = time.time()
         cached = _UIB_VIEW_CACHE.get(cache_key)  # type: ignore[name-defined]
         if cached and (now - float(cached[0])) < 20.0:
             org, rows, summary_rows = cached[1], cached[2], cached[3]
         else:
-            org, tpl, rows = build_uib_view(db, org_id=selected_org_id, actor=user)
+            org, tpl, rows = build_uib_view(db, org_id=selected_org_id, actor=user, period_id=(selected_period_id or None))
             from app.index_kb.uib_sheet import compute_uib_summary
 
             summary_rows = compute_uib_summary(rows)
@@ -1888,6 +2317,8 @@ def auditor_index_kb_uib_page(
             "show_org_selector": True,
             "readonly": False,
             "org_picker_error": org_picker_error,
+            "periods": periods,
+            "selected_period_id": selected_period_id,
         },
     )
     resp.headers["Cache-Control"] = "no-store, max-age=0"
@@ -2023,6 +2454,7 @@ def auditor_index_kb_uib_export_xlsx(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
     org_id: int = 0,
+    period_id: int | None = None,
 ) -> Response:
     if not org_id:
         raise HTTPException(status_code=400, detail="org_id обязателен")
@@ -2030,7 +2462,9 @@ def auditor_index_kb_uib_export_xlsx(
     if not get_uib_template_from_db(db):
         raise HTTPException(status_code=400, detail="Шаблон УИБ не загружен в БД (нужна seed-миграция).")
 
-    org, tpl, rows = build_uib_view(db, org_id=org_id, actor=user)
+    org_obj = db.get(Organization, org_id)
+    selected_period_id = int(period_id) if period_id else int(getattr(org_obj, "audit_period_id", 0) or 0)
+    org, tpl, rows = build_uib_view(db, org_id=org_id, actor=user, period_id=(selected_period_id or None))
     from app.index_kb.uib_sheet import compute_uib_summary
 
     summary_rows = compute_uib_summary(rows)
@@ -2047,7 +2481,13 @@ def auditor_index_kb_uib_export_xlsx(
         action="index_kb_export_uib_xlsx",
         entity_type="index_kb",
         entity_id=f"uib:{int(org_id)}",
-        after={"sheet": UIB_SHEET_NAME, "format": "xlsx", "filename": filename_utf8, "endpoint": "/auditor/index-kb/uib/export.xlsx"},
+        after={
+            "sheet": UIB_SHEET_NAME,
+            "format": "xlsx",
+            "filename": filename_utf8,
+            "endpoint": "/auditor/index-kb/uib/export.xlsx",
+            "period_id": selected_period_id,
+        },
         request=request,
     )
     db.commit()
@@ -2064,6 +2504,7 @@ def my_index_kb_uib_export_xlsx(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
     org_id: int = 0,
+    period_id: int | None = None,
 ) -> Response:
     if not org_id:
         raise HTTPException(status_code=400, detail="org_id обязателен")
@@ -2071,7 +2512,8 @@ def my_index_kb_uib_export_xlsx(
     if not get_uib_template_from_db(db):
         raise HTTPException(status_code=400, detail="Шаблон УИБ не загружен в БД (нужна seed-миграция).")
 
-    org_obj, tpl, rows = build_uib_view(db, org_id=org.id, actor=user)
+    selected_period_id = int(period_id) if period_id else int(getattr(org, "audit_period_id", 0) or 0)
+    org_obj, tpl, rows = build_uib_view(db, org_id=org.id, actor=user, period_id=selected_period_id or None)
     from app.index_kb.uib_sheet import compute_uib_summary
 
     summary_rows = compute_uib_summary(rows)
@@ -2088,7 +2530,13 @@ def my_index_kb_uib_export_xlsx(
         action="index_kb_export_uib_xlsx",
         entity_type="index_kb",
         entity_id=f"uib:{int(org.id)}",
-        after={"sheet": UIB_SHEET_NAME, "format": "xlsx", "filename": filename_utf8, "endpoint": "/my/index-kb/uib/export.xlsx"},
+        after={
+            "sheet": UIB_SHEET_NAME,
+            "format": "xlsx",
+            "filename": filename_utf8,
+            "endpoint": "/my/index-kb/uib/export.xlsx",
+            "period_id": selected_period_id,
+        },
         request=request,
     )
     db.commit()
@@ -2105,6 +2553,7 @@ def auditor_index_kb_szi_page(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
     org_id: int | None = None,
+    period_id: int | None = None,
 ) -> HTMLResponse:
     t0 = time.perf_counter()
     orgs_all = _get_accessible_orgs_for_auditor(db, user)
@@ -2123,6 +2572,15 @@ def auditor_index_kb_szi_page(
         _require_auditor_or_admin_for_org(db, user, selected_org_id)
     else:
         org_picker_error = True
+
+    periods = db.query(AuditPeriod).order_by(AuditPeriod.date_to.desc(), AuditPeriod.date_from.desc(), AuditPeriod.sort_order.asc(), AuditPeriod.id.desc()).all()
+    selected_period_id: int | None = int(period_id) if period_id else None
+    if selected_period_id is None and selected_org_id:
+        o = db.get(Organization, int(selected_org_id))
+        if o and getattr(o, "audit_period_id", None):
+            selected_period_id = int(o.audit_period_id)
+    if selected_period_id is None and periods:
+        selected_period_id = int(periods[0].id)
 
     # Cache full view for snappy reloads. Keyed by (org_id, template_mtime_ns).
     global _SZI_VIEW_CACHE
@@ -2165,7 +2623,7 @@ def auditor_index_kb_szi_page(
             return resp
         t1 = time.perf_counter()
         tpl_rev = get_szi_template_rev(db)
-        cache_key = (int(selected_org_id), int(tpl_rev))
+        cache_key = (int(selected_org_id), int(tpl_rev), int(selected_period_id or 0))
         now = time.time()
         cached = _SZI_VIEW_CACHE.get(cache_key)  # type: ignore[name-defined]
         if cached and (now - float(cached[0])) < 20.0:
@@ -2173,7 +2631,7 @@ def auditor_index_kb_szi_page(
             t_build = 0.0
             t_sum = 0.0
         else:
-            org, tpl, rows = build_szi_view(db, org_id=selected_org_id, actor=user)
+            org, tpl, rows = build_szi_view(db, org_id=selected_org_id, actor=user, period_id=(selected_period_id or None))
             t2 = time.perf_counter()
             from app.index_kb.szi_sheet import compute_szi_summary
 
@@ -2214,6 +2672,8 @@ def auditor_index_kb_szi_page(
             "show_org_selector": True,
             "readonly": False,
             "org_picker_error": org_picker_error,
+            "periods": periods,
+            "selected_period_id": selected_period_id,
         },
     )
     resp.headers["Cache-Control"] = "no-store, max-age=0"
@@ -2249,6 +2709,7 @@ def auditor_index_kb_szi_export_xlsx(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
     org_id: int = 0,
+    period_id: int | None = None,
 ) -> Response:
     if not org_id:
         raise HTTPException(status_code=400, detail="org_id обязателен")
@@ -2256,7 +2717,9 @@ def auditor_index_kb_szi_export_xlsx(
     if not get_szi_template_from_db(db):
         raise HTTPException(status_code=400, detail="Шаблон СЗИ не загружен в БД (нужна seed-миграция).")
 
-    org, tpl, rows = build_szi_view(db, org_id=org_id, actor=user)
+    org_obj = db.get(Organization, org_id)
+    selected_period_id = int(period_id) if period_id else int(getattr(org_obj, "audit_period_id", 0) or 0)
+    org, tpl, rows = build_szi_view(db, org_id=org_id, actor=user, period_id=(selected_period_id or None))
     from app.index_kb.szi_sheet import compute_szi_summary
 
     summary_rows = compute_szi_summary(rows)
@@ -2273,7 +2736,13 @@ def auditor_index_kb_szi_export_xlsx(
         action="index_kb_export_szi_xlsx",
         entity_type="index_kb",
         entity_id=f"szi:{int(org_id)}",
-        after={"sheet": SZI_SHEET_NAME, "format": "xlsx", "filename": filename_utf8, "endpoint": "/auditor/index-kb/szi/export.xlsx"},
+        after={
+            "sheet": SZI_SHEET_NAME,
+            "format": "xlsx",
+            "filename": filename_utf8,
+            "endpoint": "/auditor/index-kb/szi/export.xlsx",
+            "period_id": selected_period_id,
+        },
         request=request,
     )
     db.commit()
@@ -2841,6 +3310,7 @@ def my_artifacts_upload(
         "audited_file_version_id": oa.audited_file_version_id,
         "audited_at": oa.audited_at.isoformat() if oa.audited_at else None,
         "audited_by_user_id": oa.audited_by_user_id,
+        "review_status": getattr(oa, "review_status", None).value if getattr(oa, "review_status", None) else None,
     }
     oa.status = OrgArtifactStatus.uploaded
     oa.current_file_version_id = fv.id
@@ -2850,12 +3320,14 @@ def my_artifacts_upload(
     oa.audited_file_version_id = None
     oa.audited_at = None
     oa.audited_by_user_id = None
+    oa.review_status = OrgArtifactReviewStatus.pending
     after = {
         "status": oa.status.value,
         "current_file_version_id": oa.current_file_version_id,
         "audited_file_version_id": oa.audited_file_version_id,
         "audited_at": oa.audited_at,
         "audited_by_user_id": oa.audited_by_user_id,
+        "review_status": oa.review_status.value,
     }
 
     write_audit_log(
@@ -2922,6 +3394,7 @@ def my_artifacts_delete(
         "audited_file_version_id": oa.audited_file_version_id,
         "audited_at": oa.audited_at.isoformat() if oa.audited_at else None,
         "audited_by_user_id": oa.audited_by_user_id,
+        "review_status": getattr(oa, "review_status", None).value if getattr(oa, "review_status", None) else None,
     }
     oa.current_file_version_id = None
     oa.status = OrgArtifactStatus.missing
@@ -2930,12 +3403,14 @@ def my_artifacts_delete(
     oa.audited_file_version_id = None
     oa.audited_at = None
     oa.audited_by_user_id = None
+    oa.review_status = OrgArtifactReviewStatus.pending
     after = {
         "status": oa.status.value,
         "current_file_version_id": oa.current_file_version_id,
         "audited_file_version_id": oa.audited_file_version_id,
         "audited_at": oa.audited_at,
         "audited_by_user_id": oa.audited_by_user_id,
+        "review_status": oa.review_status.value,
     }
 
     write_audit_log(
@@ -3168,6 +3643,372 @@ def admin_index(request: Request, user: User = Depends(require_admin)) -> HTMLRe
     return templates.TemplateResponse("admin/index.html", {"request": request, "user": user})
 
 
+@router.get("/admin/audit-periods", response_class=HTMLResponse)
+def admin_audit_periods_page(
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_admin),
+    err: str | None = None,
+) -> HTMLResponse:
+    periods = db.query(AuditPeriod).order_by(AuditPeriod.sort_order.asc(), AuditPeriod.id.asc()).all()
+    err_text = (err or "").strip() or None
+    return templates.TemplateResponse(
+        "admin/audit_periods.html",
+        {"request": request, "user": user, "container_class": "container-wide", "periods": periods, "error": err_text},
+    )
+
+
+@router.post("/admin/audit-periods")
+def admin_audit_periods_create(
+    request: Request,
+    code: str = Form(...),
+    name: str = Form(...),
+    date_from: str = Form(...),
+    date_to: str = Form(...),
+    sort_order: int = Form(0),
+    is_active: str = Form("1"),
+    db: Session = Depends(get_db),
+    user: User = Depends(require_admin),
+) -> Response:
+    code = (code or "").strip().upper()
+    name = (name or "").strip()
+    if not code or not name:
+        return _redirect("/admin/audit-periods?err=" + quote("Код и название обязательны"))
+    if len(code) > 32:
+        return _redirect("/admin/audit-periods?err=" + quote("Код слишком длинный (макс 32)"))
+    try:
+        df = date.fromisoformat((date_from or "").strip())
+        dt = date.fromisoformat((date_to or "").strip())
+    except Exception:
+        return _redirect("/admin/audit-periods?err=" + quote("Некорректные даты периода"))
+    if df > dt:
+        return _redirect("/admin/audit-periods?err=" + quote("date_from не может быть больше date_to"))
+    active = (is_active or "").strip() not in ("0", "false", "False", "off")
+
+    exists = db.query(AuditPeriod).filter(AuditPeriod.code == code).one_or_none()
+    if exists:
+        return _redirect("/admin/audit-periods?err=" + quote("Период с таким кодом уже существует"))
+    ap = AuditPeriod(code=code, name=name, date_from=df, date_to=dt, sort_order=int(sort_order or 0), is_active=active)
+    db.add(ap)
+    db.flush()
+    write_audit_log(
+        db,
+        actor=user,
+        org_id=None,
+        action="create",
+        entity_type="audit_period",
+        entity_id=str(ap.id),
+        after={
+            "code": ap.code,
+            "name": ap.name,
+            "date_from": ap.date_from.isoformat(),
+            "date_to": ap.date_to.isoformat(),
+            "sort_order": ap.sort_order,
+            "is_active": ap.is_active,
+        },
+        request=request,
+    )
+    db.commit()
+    return _redirect("/admin/audit-periods")
+
+
+@router.post("/admin/audit-periods/{period_id}")
+def admin_audit_periods_update(
+    period_id: int,
+    request: Request,
+    name: str = Form(...),
+    date_from: str = Form(...),
+    date_to: str = Form(...),
+    sort_order: int = Form(0),
+    is_active: str = Form("1"),
+    db: Session = Depends(get_db),
+    user: User = Depends(require_admin),
+) -> Response:
+    ap = db.get(AuditPeriod, period_id)
+    if not ap:
+        raise HTTPException(status_code=404, detail="Период не найден")
+    nm = (name or "").strip()
+    if not nm:
+        return _redirect("/admin/audit-periods?err=" + quote("Название обязательно"))
+    try:
+        df = date.fromisoformat((date_from or "").strip())
+        dt = date.fromisoformat((date_to or "").strip())
+    except Exception:
+        return _redirect("/admin/audit-periods?err=" + quote("Некорректные даты периода"))
+    if df > dt:
+        return _redirect("/admin/audit-periods?err=" + quote("date_from не может быть больше date_to"))
+    active = (is_active or "").strip() not in ("0", "false", "False", "off")
+    before = {
+        "name": ap.name,
+        "date_from": ap.date_from.isoformat() if ap.date_from else "",
+        "date_to": ap.date_to.isoformat() if ap.date_to else "",
+        "sort_order": ap.sort_order,
+        "is_active": ap.is_active,
+    }
+    ap.name = nm
+    ap.date_from = df
+    ap.date_to = dt
+    ap.sort_order = int(sort_order or 0)
+    ap.is_active = active
+    write_audit_log(
+        db,
+        actor=user,
+        org_id=None,
+        action="update",
+        entity_type="audit_period",
+        entity_id=str(ap.id),
+        before=before,
+        after={
+            "code": ap.code,
+            "name": ap.name,
+            "date_from": ap.date_from.isoformat(),
+            "date_to": ap.date_to.isoformat(),
+            "sort_order": ap.sort_order,
+            "is_active": ap.is_active,
+        },
+        request=request,
+    )
+    db.commit()
+    return _redirect("/admin/audit-periods")
+
+
+@router.get("/admin/artifact-levels", response_class=HTMLResponse)
+def admin_artifact_levels_page(
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_admin),
+    err: str | None = None,
+) -> HTMLResponse:
+    levels = db.query(ArtifactLevel).order_by(ArtifactLevel.sort_order.asc(), ArtifactLevel.id.asc()).all()
+    err_text = (err or "").strip() or None
+    return templates.TemplateResponse(
+        "admin/artifact_levels.html",
+        {"request": request, "user": user, "container_class": "container-wide", "levels": levels, "error": err_text},
+    )
+
+
+@router.post("/admin/artifact-levels")
+def admin_artifact_levels_create(
+    request: Request,
+    code: str = Form(...),
+    name: str = Form(...),
+    sort_order: int = Form(0),
+    color: str = Form("#64748b"),
+    is_active: str = Form("1"),
+    db: Session = Depends(get_db),
+    user: User = Depends(require_admin),
+) -> Response:
+    code = (code or "").strip().upper()
+    name = (name or "").strip()
+    color = (color or "").strip() or "#64748b"
+    if not code or not name:
+        return _redirect("/admin/artifact-levels?err=" + quote("Код и название обязательны"))
+    if len(code) > 32:
+        return _redirect("/admin/artifact-levels?err=" + quote("Код слишком длинный (макс 32)"))
+    active = (is_active or "").strip() not in ("0", "false", "False", "off")
+    exists = db.query(ArtifactLevel).filter(ArtifactLevel.code == code).one_or_none()
+    if exists:
+        return _redirect("/admin/artifact-levels?err=" + quote("Уровень с таким кодом уже существует"))
+    lvl = ArtifactLevel(code=code, name=name, sort_order=int(sort_order or 0), color=color[:32], is_active=active)
+    db.add(lvl)
+    db.flush()
+    write_audit_log(
+        db,
+        actor=user,
+        org_id=None,
+        action="create",
+        entity_type="artifact_level",
+        entity_id=str(lvl.id),
+        after={"code": lvl.code, "name": lvl.name, "sort_order": lvl.sort_order, "color": lvl.color, "is_active": lvl.is_active},
+        request=request,
+    )
+    db.commit()
+    return _redirect("/admin/artifact-levels")
+
+
+@router.post("/admin/artifact-levels/{level_id}")
+def admin_artifact_levels_update(
+    level_id: int,
+    request: Request,
+    name: str = Form(...),
+    sort_order: int = Form(0),
+    color: str = Form("#64748b"),
+    is_active: str = Form("1"),
+    db: Session = Depends(get_db),
+    user: User = Depends(require_admin),
+) -> Response:
+    lvl = db.get(ArtifactLevel, level_id)
+    if not lvl:
+        raise HTTPException(status_code=404, detail="Уровень не найден")
+    nm = (name or "").strip()
+    if not nm:
+        return _redirect("/admin/artifact-levels?err=" + quote("Название обязательно"))
+    active = (is_active or "").strip() not in ("0", "false", "False", "off")
+    before = {"name": lvl.name, "sort_order": lvl.sort_order, "color": lvl.color, "is_active": lvl.is_active}
+    lvl.name = nm
+    lvl.sort_order = int(sort_order or 0)
+    lvl.color = (color or "").strip()[:32] or "#64748b"
+    lvl.is_active = active
+    write_audit_log(
+        db,
+        actor=user,
+        org_id=None,
+        action="update",
+        entity_type="artifact_level",
+        entity_id=str(lvl.id),
+        before=before,
+        after={"code": lvl.code, "name": lvl.name, "sort_order": lvl.sort_order, "color": lvl.color, "is_active": lvl.is_active},
+        request=request,
+    )
+    db.commit()
+    return _redirect("/admin/artifact-levels")
+
+
+@router.get("/admin/artifact-levels/{level_id}", response_class=HTMLResponse)
+def admin_artifact_level_edit_page(
+    level_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_admin),
+    q: str | None = None,
+    topic: str | None = None,
+    domain: str | None = None,
+    kb_level: str | None = None,
+    short_name: str | None = None,
+) -> HTMLResponse:
+    lvl = db.get(ArtifactLevel, level_id)
+    if not lvl:
+        raise HTTPException(status_code=404, detail="Уровень не найден")
+
+    items = (
+        db.query(ArtifactLevelItem, Artifact)
+        .join(Artifact, Artifact.id == ArtifactLevelItem.artifact_id)
+        .filter(ArtifactLevelItem.level_id == lvl.id)
+        .order_by(Artifact.topic.asc(), Artifact.domain.asc(), Artifact.short_name.asc(), Artifact.achievement_item_no.asc().nullsfirst())
+        .all()
+    )
+    current = [{"artifact": a, "item_id": it.id} for (it, a) in items]
+    current_ids = {a.id for (_, a) in items}
+
+    aq = db.query(Artifact).order_by(Artifact.topic.asc(), Artifact.domain.asc(), Artifact.short_name.asc(), Artifact.achievement_item_no.asc().nullsfirst())
+    if topic:
+        aq = aq.filter(Artifact.topic == topic)
+    if domain:
+        aq = aq.filter(Artifact.domain == domain)
+    if kb_level:
+        aq = aq.filter(Artifact.kb_level == kb_level)
+    if short_name:
+        aq = aq.filter(Artifact.short_name == short_name)
+    if q:
+        like = f"%{q.strip()}%"
+        aq = aq.filter(
+            (Artifact.indicator_name.ilike(like))
+            | (Artifact.title.ilike(like))
+            | (Artifact.achievement_text.ilike(like))
+            | (Artifact.achievement_item_text.ilike(like))
+        )
+    candidates = aq.limit(250).all()
+
+    topics = [t for (t,) in db.query(Artifact.topic).filter(Artifact.topic != "").distinct().order_by(Artifact.topic.asc()).all()]
+    domains = [d for (d,) in db.query(Artifact.domain).filter(Artifact.domain != "").distinct().order_by(Artifact.domain.asc()).all()]
+    kb_levels = [k for (k,) in db.query(Artifact.kb_level).filter(Artifact.kb_level != "").distinct().order_by(Artifact.kb_level.asc()).all()]
+
+    return templates.TemplateResponse(
+        "admin/artifact_level_edit.html",
+        {
+            "request": request,
+            "user": user,
+            "container_class": "container-wide",
+            "level": lvl,
+            "current": current,
+            "current_ids": current_ids,
+            "candidates": candidates,
+            "filters": {"q": q or "", "topic": topic or "", "domain": domain or "", "kb_level": kb_level or "", "short_name": short_name or ""},
+            "topics": topics,
+            "domains": domains,
+            "kb_levels": kb_levels,
+        },
+    )
+
+
+@router.post("/admin/artifact-levels/{level_id}/items/add")
+def admin_artifact_level_items_add(
+    level_id: int,
+    request: Request,
+    artifact_ids: list[int] = Form([]),
+    back: str = Form(""),
+    db: Session = Depends(get_db),
+    user: User = Depends(require_admin),
+) -> Response:
+    lvl = db.get(ArtifactLevel, level_id)
+    if not lvl:
+        raise HTTPException(status_code=404, detail="Уровень не найден")
+    ids = sorted({int(x) for x in (artifact_ids or []) if int(x) > 0})
+    if not ids:
+        return _redirect(back or f"/admin/artifact-levels/{lvl.id}")
+
+    existing = {
+        int(aid)
+        for (aid,) in db.query(ArtifactLevelItem.artifact_id)
+        .filter(ArtifactLevelItem.level_id == lvl.id, ArtifactLevelItem.artifact_id.in_(ids))
+        .all()
+    }
+    created = 0
+    for aid in ids:
+        if aid in existing:
+            continue
+        db.add(ArtifactLevelItem(level_id=lvl.id, artifact_id=aid))
+        created += 1
+    write_audit_log(
+        db,
+        actor=user,
+        org_id=None,
+        action="add_items",
+        entity_type="artifact_level",
+        entity_id=str(lvl.id),
+        after={"added_count": created, "artifact_ids": ids},
+        request=request,
+    )
+    db.commit()
+    ref = (back or "").strip() or f"/admin/artifact-levels/{lvl.id}"
+    if not ref.startswith("/") or "://" in ref:
+        ref = f"/admin/artifact-levels/{lvl.id}"
+    return _redirect(ref)
+
+
+@router.post("/admin/artifact-levels/{level_id}/items/{artifact_id}/delete")
+def admin_artifact_level_items_delete(
+    level_id: int,
+    artifact_id: int,
+    request: Request,
+    back: str = Form(""),
+    db: Session = Depends(get_db),
+    user: User = Depends(require_admin),
+) -> Response:
+    lvl = db.get(ArtifactLevel, level_id)
+    if not lvl:
+        raise HTTPException(status_code=404, detail="Уровень не найден")
+    it = db.query(ArtifactLevelItem).filter(ArtifactLevelItem.level_id == lvl.id, ArtifactLevelItem.artifact_id == artifact_id).one_or_none()
+    if it:
+        db.delete(it)
+        write_audit_log(
+            db,
+            actor=user,
+            org_id=None,
+            action="remove_item",
+            entity_type="artifact_level",
+            entity_id=str(lvl.id),
+            before={"artifact_id": int(artifact_id)},
+            after=None,
+            request=request,
+        )
+        db.commit()
+    ref = (back or "").strip() or f"/admin/artifact-levels/{lvl.id}"
+    if not ref.startswith("/") or "://" in ref:
+        ref = f"/admin/artifact-levels/{lvl.id}"
+    return _redirect(ref)
+
+
 def _get_nextcloud_settings(db: Session) -> NextcloudIntegrationSettings:
     s = db.query(NextcloudIntegrationSettings).order_by(NextcloudIntegrationSettings.id.asc()).first()
     if not s:
@@ -3330,11 +4171,14 @@ def admin_audit_log_page(
         s = state or {}
         cur = s.get("current_file_version_id")
         aud = s.get("audited_file_version_id")
+        review = (s.get("review_status") or "").strip().lower()
         if not cur:
             return "—"
+        if review == "needs_correction":
+            return "Требует корректировки"
         if not aud:
             return "Требует аудита"
-        if aud == cur:
+        if review in ("", "approved") and aud == cur:
             return "Проаудировано"
         return "Изменён"
 
@@ -3371,6 +4215,9 @@ def admin_audit_log_page(
         "delete_file": "Удаление файла",
         "comment": "Комментарий",
         "audit": "Проверено",
+        "audit_needs_correction": "Требует корректировки",
+        "add_items": "Добавить артефакты",
+        "remove_item": "Убрать артефакт",
         "import_apply": "Импорт (применить)",
         "export_xlsx": "Экспорт XLSX",
         "org_artifacts_export_xlsx": "Экспорт Excel (артефакты)",
@@ -3389,6 +4236,8 @@ def admin_audit_log_page(
         "user": "Пользователь",
         "membership": "Роль/доступ",
         "nextcloud_settings": "Настройки Nextcloud",
+        "audit_period": "Период аудита",
+        "artifact_level": "Уровень",
         "index_kb": "Индекс КБ",
         "org_artifacts": "Артефакты (выгрузка)",
         "org": "Организация",
@@ -3895,7 +4744,13 @@ def admin_orgs_create(
             {"request": request, "user": user, "error": "Организация уже существует", "form": {"name": name}},
             status_code=400,
         )
-    org = Organization(name=name, created_by_user_id=user.id, created_via="manual")
+    org = Organization(
+        name=name,
+        created_by_user_id=user.id,
+        created_via="manual",
+        audit_period_id=_get_default_audit_period_id(db),
+        artifact_level_id=_get_default_artifact_level_id(db),
+    )
     db.add(org)
     db.flush()
     write_audit_log(
@@ -3922,7 +4777,12 @@ def admin_orgs_edit_page(
     org = db.get(Organization, org_id)
     if not org:
         raise HTTPException(status_code=404, detail="Организация не найдена")
-    return templates.TemplateResponse("admin/org_edit.html", {"request": request, "user": user, "org": org, "error": None})
+    periods = _get_active_audit_periods(db)
+    levels = _get_active_artifact_levels(db)
+    return templates.TemplateResponse(
+        "admin/org_edit.html",
+        {"request": request, "user": user, "org": org, "error": None, "periods": periods, "levels": levels},
+    )
 
 
 @router.post("/admin/orgs/{org_id}/edit")
@@ -3930,6 +4790,8 @@ def admin_orgs_edit_save(
     org_id: int,
     request: Request,
     name: str = Form(...),
+    audit_period_id: str = Form(""),
+    artifact_level_id: str = Form(""),
     db: Session = Depends(get_db),
     user: User = Depends(require_admin),
 ) -> Response:
@@ -3938,12 +4800,55 @@ def admin_orgs_edit_save(
         raise HTTPException(status_code=404, detail="Организация не найдена")
     name = name.strip()
     if not name:
-        return templates.TemplateResponse("admin/org_edit.html", {"request": request, "user": user, "org": org, "error": "Имя организации обязательно"}, status_code=400)
+        periods = _get_active_audit_periods(db)
+        levels = _get_active_artifact_levels(db)
+        return templates.TemplateResponse(
+            "admin/org_edit.html",
+            {"request": request, "user": user, "org": org, "error": "Имя организации обязательно", "periods": periods, "levels": levels},
+            status_code=400,
+        )
     exists = db.query(Organization).filter(Organization.name == name, Organization.id != org.id).one_or_none()
     if exists:
-        return templates.TemplateResponse("admin/org_edit.html", {"request": request, "user": user, "org": org, "error": "Организация с таким именем уже существует"}, status_code=400)
-    before = {"name": org.name}
+        periods = _get_active_audit_periods(db)
+        levels = _get_active_artifact_levels(db)
+        return templates.TemplateResponse(
+            "admin/org_edit.html",
+            {"request": request, "user": user, "org": org, "error": "Организация с таким именем уже существует", "periods": periods, "levels": levels},
+            status_code=400,
+        )
+
+    def _parse_int_or_none(v: str) -> int | None:
+        s = (v or "").strip()
+        return int(s) if s.isdigit() else None
+
+    audit_period_id_val = _parse_int_or_none(audit_period_id)
+    artifact_level_id_val = _parse_int_or_none(artifact_level_id)
+
+    if audit_period_id_val is not None and not db.get(AuditPeriod, audit_period_id_val):
+        periods = _get_active_audit_periods(db)
+        levels = _get_active_artifact_levels(db)
+        return templates.TemplateResponse(
+            "admin/org_edit.html",
+            {"request": request, "user": user, "org": org, "error": "Некорректный период аудита", "periods": periods, "levels": levels},
+            status_code=400,
+        )
+    if artifact_level_id_val is not None and not db.get(ArtifactLevel, artifact_level_id_val):
+        periods = _get_active_audit_periods(db)
+        levels = _get_active_artifact_levels(db)
+        return templates.TemplateResponse(
+            "admin/org_edit.html",
+            {"request": request, "user": user, "org": org, "error": "Некорректный уровень", "periods": periods, "levels": levels},
+            status_code=400,
+        )
+
+    before = {
+        "name": org.name,
+        "audit_period_id": getattr(org, "audit_period_id", None),
+        "artifact_level_id": getattr(org, "artifact_level_id", None),
+    }
     org.name = name
+    org.audit_period_id = audit_period_id_val
+    org.artifact_level_id = artifact_level_id_val
     write_audit_log(
         db,
         actor=user,
@@ -3952,7 +4857,11 @@ def admin_orgs_edit_save(
         entity_type="organization",
         entity_id=str(org.id),
         before=before,
-        after={"name": org.name},
+        after={
+            "name": org.name,
+            "audit_period_id": getattr(org, "audit_period_id", None),
+            "artifact_level_id": getattr(org, "artifact_level_id", None),
+        },
         request=request,
     )
     db.commit()

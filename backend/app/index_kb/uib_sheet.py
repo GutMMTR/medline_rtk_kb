@@ -4,14 +4,27 @@ import os
 import re
 import time
 from dataclasses import dataclass
+from datetime import date, datetime, timedelta
 from functools import lru_cache
 
 from openpyxl import load_workbook
 from sqlalchemy import and_, case, func
-from sqlalchemy.orm import joinedload
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 
-from app.db.models import Artifact, IndexKbManualValue, IndexKbTemplateRow, OrgArtifact, OrgArtifactStatus, Organization, User
+from app.db.models import (
+    Artifact,
+    ArtifactLevel,
+    ArtifactLevelItem,
+    AuditPeriod,
+    FileVersion,
+    IndexKbManualValue,
+    IndexKbTemplateRow,
+    OrgArtifact,
+    OrgArtifactReviewStatus,
+    OrgArtifactStatus,
+    Organization,
+    User,
+)
 
 
 UIB_SHEET_NAME = "Управление ИБ"
@@ -202,18 +215,75 @@ def ensure_uib_template_loaded(db: Session, *, template_path: str | None, force:
     return len(tpl.rows)
 
 
-def compute_auto_scores(db: Session, org_id: int, short_names: list[str]) -> dict[str, float]:
+def _period_bounds_utc(*, date_from: date, date_to: date) -> tuple[datetime, datetime]:
+    start = datetime.combine(date_from, datetime.min.time())
+    end = datetime.combine(date_to, datetime.min.time()) + timedelta(days=1)
+    return start, end
+
+
+def _get_selected_period_bounds(
+    db: Session,
+    *,
+    org: Organization,
+    period_id: int | None,
+) -> tuple[AuditPeriod | None, datetime | None, datetime | None]:
+    pid = int(period_id or 0) or int(getattr(org, "audit_period_id", 0) or 0)
+    if not pid:
+        return None, None, None
+    ap = db.get(AuditPeriod, pid)
+    if not ap:
+        return None, None, None
+    df = getattr(ap, "date_from", None)
+    dt = getattr(ap, "date_to", None)
+    if not df or not dt:
+        return ap, None, None
+    try:
+        start, end = _period_bounds_utc(date_from=df, date_to=dt)
+        return ap, start, end
+    except Exception:
+        return ap, None, None
+
+
+def _allowed_artifact_ids_subquery(db: Session, *, org: Organization):
+    """
+    Эффективный набор артефактов для уровня организации:
+    union(items) по уровням sort_order <= выбранного уровня.
+    """
+    level_id = getattr(org, "artifact_level_id", None)
+    if not level_id:
+        return None
+    lvl = db.get(ArtifactLevel, int(level_id))
+    if not lvl:
+        return None
+    return (
+        db.query(ArtifactLevelItem.artifact_id)
+        .join(ArtifactLevel, ArtifactLevel.id == ArtifactLevelItem.level_id)
+        .filter(ArtifactLevel.sort_order <= lvl.sort_order)
+        .subquery()
+    )
+
+
+def compute_auto_scores(
+    db: Session,
+    *,
+    org: Organization,
+    short_names: list[str],
+    period_id: int | None,
+) -> tuple[dict[str, float], set[str]]:
     """
     Auto-score rule (requested):
-    - if artifact exists and all points are AUDITED (audited_file_version_id == current_file_version_id) => 5
+    - for a selected calendar period:
+      - take the latest file version uploaded in the period for each org_artifact
+      - count as 5 only if that version was audited (approved) in the same period
+    - only consider artifacts within the organization's effective level
     - else => 0
     """
     if not short_names:
-        return {}
+        return {}, set()
     sns = sorted({s.upper() for s in short_names if s})
 
     # Determine which short_names exist in artifact справочнике.
-    existing = {
+    existing_all = {
         (sn or "").upper()
         for (sn,) in db.query(Artifact.short_name)
         .filter(Artifact.short_name != "", func.upper(Artifact.short_name).in_(sns))
@@ -221,34 +291,103 @@ def compute_auto_scores(db: Session, org_id: int, short_names: list[str]) -> dic
         .all()
         if sn
     }
-    if not existing:
-        return {}
+    if not existing_all:
+        return {}, set()
 
-    audited_flag = case(
-        (
-            and_(
-                OrgArtifact.current_file_version_id.isnot(None),
-                OrgArtifact.audited_file_version_id.isnot(None),
-                OrgArtifact.audited_file_version_id == OrgArtifact.current_file_version_id,
+    allowed_sub = _allowed_artifact_ids_subquery(db, org=org)
+    if allowed_sub is not None:
+        existing_allowed = {
+            (sn or "").upper()
+            for (sn,) in db.query(Artifact.short_name)
+            .filter(
+                Artifact.short_name != "",
+                func.upper(Artifact.short_name).in_(sorted(existing_all)),
+                Artifact.id.in_(allowed_sub),
+            )
+            .distinct()
+            .all()
+            if sn
+        }
+    else:
+        existing_allowed = set(existing_all)
+    excluded = set(existing_all) - set(existing_allowed)
+    if not existing_allowed:
+        # Everything is outside the org level.
+        return {}, excluded
+
+    ap, p_start, p_end = _get_selected_period_bounds(db, org=org, period_id=period_id)
+
+    # Base query scope (org + level).
+    base_filters = [OrgArtifact.org_id == int(org.id)]
+    if allowed_sub is not None:
+        base_filters.append(OrgArtifact.artifact_id.in_(allowed_sub))
+
+    if p_start and p_end:
+        # Latest file version uploaded in the period per org_artifact.
+        sub = (
+            db.query(
+                FileVersion.org_artifact_id.label("oa_id"),
+                func.max(FileVersion.id).label("fv_id"),
+            )
+            .filter(FileVersion.created_at >= p_start, FileVersion.created_at < p_end)
+            .group_by(FileVersion.org_artifact_id)
+            .subquery()
+        )
+
+        audited_flag = case(
+            (
+                and_(
+                    sub.c.fv_id.isnot(None),
+                    OrgArtifact.audited_file_version_id.isnot(None),
+                    OrgArtifact.audited_file_version_id == sub.c.fv_id,
+                    OrgArtifact.review_status == OrgArtifactReviewStatus.approved,
+                    OrgArtifact.audited_at.isnot(None),
+                    OrgArtifact.audited_at >= p_start,
+                    OrgArtifact.audited_at < p_end,
+                ),
+                1,
             ),
-            1,
-        ),
-        else_=0,
-    )
-    rows = (
-        db.query(func.upper(Artifact.short_name).label("sn"), func.min(audited_flag).label("all_audited"))
-        .join(OrgArtifact, OrgArtifact.artifact_id == Artifact.id)
-        .filter(OrgArtifact.org_id == org_id, Artifact.short_name != "", func.upper(Artifact.short_name).in_(sorted(existing)))
-        .group_by(func.upper(Artifact.short_name))
-        .all()
-    )
+            else_=0,
+        )
+        rows = (
+            db.query(func.upper(Artifact.short_name).label("sn"), func.min(audited_flag).label("all_audited"))
+            .join(OrgArtifact, OrgArtifact.artifact_id == Artifact.id)
+            .outerjoin(sub, sub.c.oa_id == OrgArtifact.id)
+            .filter(*base_filters)
+            .filter(Artifact.short_name != "", func.upper(Artifact.short_name).in_(sorted(existing_allowed)))
+            .group_by(func.upper(Artifact.short_name))
+            .all()
+        )
+    else:
+        # Fallback: current audited==current rule (still restricted by level).
+        audited_flag = case(
+            (
+                and_(
+                    OrgArtifact.current_file_version_id.isnot(None),
+                    OrgArtifact.audited_file_version_id.isnot(None),
+                    OrgArtifact.audited_file_version_id == OrgArtifact.current_file_version_id,
+                    OrgArtifact.review_status == OrgArtifactReviewStatus.approved,
+                ),
+                1,
+            ),
+            else_=0,
+        )
+        rows = (
+            db.query(func.upper(Artifact.short_name).label("sn"), func.min(audited_flag).label("all_audited"))
+            .join(OrgArtifact, OrgArtifact.artifact_id == Artifact.id)
+            .filter(*base_filters)
+            .filter(Artifact.short_name != "", func.upper(Artifact.short_name).in_(sorted(existing_allowed)))
+            .group_by(func.upper(Artifact.short_name))
+            .all()
+        )
+
     out: dict[str, float] = {}
     for sn_u, all_audited in rows:
         out[str(sn_u).upper()] = 5.0 if int(all_audited or 0) == 1 else 0.0
-    # If exists in справочнике but нет org_artifacts (не материализовано) — считаем 0
-    for sn_u in existing:
+    # If exists in level+artifact reference but нет org_artifacts (не материализовано) — считаем 0
+    for sn_u in existing_allowed:
         out.setdefault(sn_u, 0.0)
-    return out
+    return out, excluded
 
 
 def load_manual_values(db: Session, org_id: int, sheet_name: str) -> dict[str, IndexKbManualValue]:
@@ -320,7 +459,13 @@ def compute_uib_summary(rows: list[UibRowView]) -> list[UibSummaryRow]:
     return out
 
 
-def build_uib_view(db: Session, *, org_id: int, actor: User) -> tuple[Organization, UibTemplate, list[UibRowView]]:
+def build_uib_view(
+    db: Session,
+    *,
+    org_id: int,
+    actor: User,
+    period_id: int | None = None,
+) -> tuple[Organization, UibTemplate, list[UibRowView]]:
     org = db.get(Organization, org_id)
     if not org:
         raise RuntimeError("Организация не найдена")
@@ -337,14 +482,14 @@ def build_uib_view(db: Session, *, org_id: int, actor: User) -> tuple[Organizati
         _UIB_AUTO_CACHE
     except NameError:
         _UIB_AUTO_CACHE = {}  # type: ignore[var-annotated]
-    cache_key = (int(org_id), int(tpl.mtime_ns))
+    cache_key = (int(org_id), int(tpl.mtime_ns), int(period_id or 0), int(getattr(org, "audit_period_id", 0) or 0))
     now = time.time()
     cached = _UIB_AUTO_CACHE.get(cache_key)  # type: ignore[name-defined]
     if cached and (now - float(cached[0])) < 15.0:
-        auto = cached[1]
+        auto, excluded = cached[1], cached[2]
     else:
-        auto = compute_auto_scores(db, org_id, short_names)
-        _UIB_AUTO_CACHE[cache_key] = (now, auto)  # type: ignore[name-defined]
+        auto, excluded = compute_auto_scores(db, org=org, short_names=short_names, period_id=period_id)
+        _UIB_AUTO_CACHE[cache_key] = (now, auto, excluded)  # type: ignore[name-defined]
     manual = load_manual_values(db, org_id, UIB_SHEET_NAME)
 
     out: list[UibRowView] = []
@@ -355,6 +500,9 @@ def build_uib_view(db: Session, *, org_id: int, actor: User) -> tuple[Organizati
 
         key = r.row_key
         sn_u = r.short_name.upper()
+        if sn_u in excluded:
+            out.append(UibRowView(row=r, is_auto=True, value=None, source="вне уровня", updated_at=None, updated_by=""))
+            continue
         if sn_u in auto:
             out.append(UibRowView(row=r, is_auto=True, value=auto[sn_u], source="auto", updated_at=None, updated_by=""))
             continue

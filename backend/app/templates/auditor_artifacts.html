@@ -6,6 +6,13 @@
       <div class="muted">
         Заполнено: <b>{{ completion_uploaded }}</b> из <b>{{ completion_total }}</b> ({{ completion_pct }}%) · осталось {{ completion_total - completion_uploaded }}
       </div>
+      {% if org_period or org_level %}
+        <div class="muted" style="margin-top:4px">
+          {% if org_period %}Период: <b>{{ org_period.name }}</b> ({{ org_period.date_from|d }} — {{ org_period.date_to|d }}){% endif %}
+          {% if org_period and org_level %} · {% endif %}
+          {% if org_level %}Уровень: <b>{{ org_level.name }}</b>{% endif %}
+        </div>
+      {% endif %}
     </div>
     <div class="row-right">
       <form method="get" action="/auditor/artifacts" class="header-inline-form org-picker {% if org_required %}org-picker--error{% endif %}">
@@ -15,9 +22,10 @@
         <input type="hidden" name="short_name" value="{{ short_name or '' }}" />
         <input type="hidden" name="q" value="{{ q or '' }}" />
         <input type="hidden" name="status" value="{{ status or '' }}" />
+        <input type="hidden" name="level" value="{{ level or '' }}" />
         <input type="hidden" name="page_size" value="{{ page_size }}" />
         <label style="margin:0">Организация</label>
-        <select name="org_id" onchange="this.form.submit()" data-org-autocomplete="1" data-auto-submit="1" data-placeholder="Поиск организации…">
+        <select name="org_id" onchange="this.form.submit()" data-org-autocomplete="1" data-auto-submit="1" data-placeholder="">
           <option value="" {% if not selected_org_id %}selected{% endif %}></option>
           {% for o in orgs %}
             <option value="{{ o.id }}" {% if o.id == selected_org_id %}selected{% endif %}>{{ o.name }}</option>
@@ -66,12 +74,22 @@
           {% endfor %}
         </select>
       </div>
+      <div class="filter-kb">
+        <label>Уровень (набор)</label>
+        <select name="level">
+          <option value="" {% if not level %}selected{% endif %}>(все)</option>
+          {% for l in levels %}
+            <option value="{{ l.code }}" {% if l.code == level %}selected{% endif %}>{{ l.name }}</option>
+          {% endfor %}
+        </select>
+      </div>
       <div class="filter-status">
         <label>Статус</label>
         <select name="status">
           <option value="" {% if not status %}selected{% endif %}>(все)</option>
           <option value="missing" {% if status == "missing" %}selected{% endif %}>Не загружен</option>
           <option value="uploaded" {% if status == "uploaded" %}selected{% endif %}>Требует аудита</option>
+          <option value="needs_correction" {% if status == "needs_correction" %}selected{% endif %}>Требует корректировки</option>
           <option value="changed" {% if status == "changed" %}selected{% endif %}>Изменён после аудита</option>
           <option value="audited" {% if status == "audited" %}selected{% endif %}>Проаудировано</option>
         </select>
@@ -82,6 +100,15 @@
       </div>
       <div class="filter-actions">
         <button class="btn" type="submit">Применить</button>
+      </div>
+      <div class="filter-meta">
+        {% if org_period %}
+          <span class="muted filter-meta__nowrap">Период: <b>{{ org_period.name }}</b> ({{ org_period.date_from|d }} — {{ org_period.date_to|d }})</span>
+        {% endif %}
+        <label class="filter-meta__label filter-meta__nowrap" style="user-select:none">
+          <input type="checkbox" name="in_period" value="1" {% if in_period %}checked{% endif %} onchange="this.form.submit()" />
+          <span>Только загруженные в период</span>
+        </label>
       </div>
     </form>
   </div>
@@ -124,7 +151,9 @@
               <td class="col-status">
                 {% if not r.oa.current_file_version_id %}
                   <span class="badge badge-danger">Нет файла</span>
-                {% elif r.oa.audited_file_version_id and r.oa.audited_file_version_id == r.oa.current_file_version_id %}
+                {% elif r.oa.review_status.value == "needs_correction" %}
+                  <span class="badge badge-danger">Требует корректировки</span>
+                {% elif r.oa.review_status.value == "approved" and r.oa.audited_file_version_id and r.oa.audited_file_version_id == r.oa.current_file_version_id %}
                   <span class="badge">Проаудировано</span>
                   {% if r.oa.audited_at %}
                     <div class="muted mono" style="margin-top:4px">{{ r.oa.audited_at|dt }}</div>
@@ -186,6 +215,19 @@
                       </form>
                     {% endif %}
 
+                    <button
+                      class="icon-btn icon-danger"
+                      type="button"
+                      data-needs-correction-btn="1"
+                      data-oa-id="{{ r.oa.id }}"
+                      title="Требует корректировки (вернуть заказчику с комментарием)"
+                      aria-label="Требует корректировки (вернуть заказчику с комментарием)"
+                    >
+                      <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" focusable="false">
+                        <path fill="currentColor" d="M12 2a10 10 0 1 0 10 10A10 10 0 0 0 12 2zm1 15h-2v-2h2zm0-4h-2V7h2z"/>
+                      </svg>
+                    </button>
+
                     <a class="icon-btn" href="/auditor/org_artifacts/{{ r.oa.id }}/view?back={{ current_url|urlencode }}" target="_blank" rel="noopener" title="Просмотр" aria-label="Просмотр">
                       <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" focusable="false">
                         <path fill="currentColor" d="M12 5c-7 0-11 7-11 7s4 7 11 7 11-7 11-7-4-7-11-7zm0 12a5 5 0 1 1 0-10 5 5 0 0 1 0 10zm0-8a3 3 0 1 0 0 6 3 3 0 0 0 0-6z"/>
@@ -213,7 +255,15 @@
             </tr>
           {% endfor %}
           {% if rows|length == 0 %}
-            <tr><td colspan="13" class="muted">Нет данных.</td></tr>
+            <tr>
+              <td colspan="13" class="muted">
+                {% if in_period %}
+                  В выбранном периоде нет загруженных файлов (или загрузки не попали в период).
+                {% else %}
+                  Нет данных по выбранным фильтрам.
+                {% endif %}
+              </td>
+            </tr>
           {% endif %}
         </tbody>
         </table>
@@ -274,5 +324,70 @@
       <div class="muted">Таблица появится после выбора организации.</div>
     </div>
   {% endif %}
+
+  <dialog id="needsCorrectionDialog">
+    <form method="post" id="needsCorrectionForm">
+      <h3 style="margin-top:0">Требует корректировки</h3>
+      <div class="muted" style="margin-bottom:10px">Укажите комментарий аудитора — он будет виден заказчику.</div>
+      <input type="hidden" name="back" value="{{ current_url }}" />
+      <label>Комментарий</label>
+      <textarea name="comment" id="needsCorrectionComment" rows="4" placeholder="Что нужно исправить?" required></textarea>
+      <div class="row-right" style="margin-top:12px; gap:8px">
+        <button class="btn btn-secondary" type="button" id="needsCorrectionCancel">Отмена</button>
+        <button class="btn" type="submit" id="needsCorrectionSubmit" disabled>Вернуть на корректировку</button>
+      </div>
+    </form>
+  </dialog>
+
+  <script>
+    (function () {
+      var dlg = document.getElementById("needsCorrectionDialog");
+      var form = document.getElementById("needsCorrectionForm");
+      var ta = document.getElementById("needsCorrectionComment");
+      var btn = document.getElementById("needsCorrectionSubmit");
+      var cancel = document.getElementById("needsCorrectionCancel");
+      if (!dlg || !form || !ta || !btn || !cancel) return;
+
+      function setEnabled() {
+        try {
+          var v = (ta.value || "").trim();
+          btn.disabled = v.length === 0;
+        } catch (e) {}
+      }
+      ta.addEventListener("input", setEnabled);
+      setEnabled();
+
+      cancel.addEventListener("click", function () {
+        try { dlg.close(); } catch (e) {}
+      });
+
+      function openFor(oaId) {
+        var id = String(oaId || "").trim();
+        if (!id) return;
+        form.action = "/auditor/org_artifacts/" + encodeURIComponent(id) + "/needs_correction";
+        ta.value = "";
+        setEnabled();
+        if (typeof dlg.showModal === "function") {
+          dlg.showModal();
+          ta.focus();
+          return;
+        }
+        // Fallback (very old browsers): use prompt
+        var txt = prompt("Комментарий аудитора (обязателен):", "");
+        if (!txt) return;
+        ta.value = txt;
+        setEnabled();
+        if (!btn.disabled) {
+          try { form.submit(); } catch (e) {}
+        }
+      }
+
+      document.querySelectorAll("[data-needs-correction-btn='1']").forEach(function (el) {
+        el.addEventListener("click", function () {
+          openFor(el.getAttribute("data-oa-id"));
+        });
+      });
+    })();
+  </script>
 {% endblock %}
 

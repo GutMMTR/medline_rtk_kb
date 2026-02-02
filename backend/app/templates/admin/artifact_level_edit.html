@@ -1,0 +1,139 @@
+{% extends "base.html" %}
+{% block content %}
+  <div class="section-header">
+    <div>
+      <h2 style="margin:0">Уровень: {{ level.name }}</h2>
+      <div class="muted">Код: <span class="mono">{{ level.code }}</span> · сортировка: {{ level.sort_order }}</div>
+    </div>
+    <div class="row-right">
+      <a class="btn btn-secondary" href="/admin/artifact-levels">Назад</a>
+    </div>
+  </div>
+
+  <div class="card">
+    <h3 style="margin-top:0">Текущий список (в этом уровне)</h3>
+    <div class="table-wrap">
+      <table class="table">
+        <thead>
+          <tr>
+            <th>Тематика</th>
+            <th>Домен</th>
+            <th>Сокращенное</th>
+            <th>Пункт</th>
+            <th>Артефакт</th>
+            <th style="width:140px"></th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for r in current %}
+            <tr>
+              <td>{{ r.artifact.topic }}</td>
+              <td>{{ r.artifact.domain }}</td>
+              <td class="mono">{{ r.artifact.short_name }}</td>
+              <td class="mono">{% if r.artifact.achievement_item_no %}{{ r.artifact.achievement_item_no }}{% else %}—{% endif %}</td>
+              <td class="cell-wrap">{{ r.artifact.title }}</td>
+              <td>
+                <form method="post" action="/admin/artifact-levels/{{ level.id }}/items/{{ r.artifact.id }}/delete" onsubmit="return confirm('Убрать артефакт из уровня?');" style="display:inline">
+                  <input type="hidden" name="back" value="/admin/artifact-levels/{{ level.id }}?{{ request.url.query }}" />
+                  <button class="btn btn-secondary" type="submit">Убрать</button>
+                </form>
+              </td>
+            </tr>
+          {% endfor %}
+          {% if current|length == 0 %}
+            <tr><td colspan="6" class="muted">Пока пусто.</td></tr>
+          {% endif %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="card">
+    <h3 style="margin-top:0">Добавить артефакты</h3>
+    <form method="get" action="/admin/artifact-levels/{{ level.id }}" class="grid filter-form">
+      <div class="filter-q">
+        <label>Поиск</label>
+        <input name="q" value="{{ filters.q }}" placeholder="например: лицензии / конфигурации" />
+      </div>
+      <div class="filter-topic">
+        <label>Тематика</label>
+        <select name="topic">
+          <option value="">(все)</option>
+          {% for t in topics %}
+            <option value="{{ t }}" {% if t == filters.topic %}selected{% endif %}>{{ t }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="filter-domain">
+        <label>Домен</label>
+        <select name="domain">
+          <option value="">(все)</option>
+          {% for d in domains %}
+            <option value="{{ d }}" {% if d == filters.domain %}selected{% endif %}>{{ d }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="filter-kb">
+        <label>Уровень КБ</label>
+        <select name="kb_level">
+          <option value="">(все)</option>
+          {% for k in kb_levels %}
+            <option value="{{ k }}" {% if k == filters.kb_level %}selected{% endif %}>{{ k }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="filter-short">
+        <label>Сокращенное (точно)</label>
+        <input name="short_name" value="{{ filters.short_name }}" placeholder="например: СЗИ.2FA.1" />
+      </div>
+      <div class="filter-actions">
+        <button class="btn" type="submit">Найти</button>
+      </div>
+    </form>
+
+    <form method="post" action="/admin/artifact-levels/{{ level.id }}/items/add">
+      <input type="hidden" name="back" value="/admin/artifact-levels/{{ level.id }}?{{ request.url.query }}" />
+      <div class="table-wrap" style="margin-top:12px">
+        <table class="table">
+          <thead>
+            <tr>
+              <th style="width:44px"></th>
+              <th>Тематика</th>
+              <th>Домен</th>
+              <th>Сокращенное</th>
+              <th>Пункт</th>
+              <th>КБ</th>
+              <th>Артефакт</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for a in candidates %}
+              <tr>
+                <td>
+                  {% if a.id in current_ids %}
+                    <span class="badge badge-neutral" title="Уже в этом уровне">✓</span>
+                  {% else %}
+                    <input type="checkbox" name="artifact_ids" value="{{ a.id }}" />
+                  {% endif %}
+                </td>
+                <td>{{ a.topic }}</td>
+                <td>{{ a.domain }}</td>
+                <td class="mono">{{ a.short_name }}</td>
+                <td class="mono">{% if a.achievement_item_no %}{{ a.achievement_item_no }}{% else %}—{% endif %}</td>
+                <td class="mono">{{ a.kb_level }}</td>
+                <td class="cell-wrap">{{ a.title }}</td>
+              </tr>
+            {% endfor %}
+            {% if candidates|length == 0 %}
+              <tr><td colspan="7" class="muted">Ничего не найдено.</td></tr>
+            {% endif %}
+          </tbody>
+        </table>
+      </div>
+      <div class="row-right" style="margin-top:12px">
+        <button class="btn btn-secondary" type="submit">Добавить выбранные</button>
+      </div>
+    </form>
+  </div>
+{% endblock %}
+

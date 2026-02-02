@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 
 from app.audit.service import write_audit_log
 from app.auth.security import hash_password
-from app.db.models import Artifact, FileVersion, OrgArtifact, OrgArtifactStatus, Role, User
+from app.db.models import Artifact, FileVersion, OrgArtifact, OrgArtifactReviewStatus, OrgArtifactStatus, Role, User
 from app.db.session import SessionLocal
 
 
@@ -149,6 +149,7 @@ def main() -> int:
                     "audited_file_version_id": getattr(oa, "audited_file_version_id", None),
                     "audited_at": getattr(oa, "audited_at", None).isoformat() if getattr(oa, "audited_at", None) else None,
                     "audited_by_user_id": getattr(oa, "audited_by_user_id", None),
+                    "review_status": getattr(oa, "review_status", None).value if getattr(oa, "review_status", None) else None,
                 }
                 oa.status = OrgArtifactStatus.uploaded
                 oa.current_file_version_id = fv.id
@@ -158,12 +159,14 @@ def main() -> int:
                 oa.audited_file_version_id = None
                 oa.audited_at = None
                 oa.audited_by_user_id = None
+                oa.review_status = OrgArtifactReviewStatus.pending
                 after = {
                     "status": oa.status.value,
                     "current_file_version_id": oa.current_file_version_id,
                     "audited_file_version_id": getattr(oa, "audited_file_version_id", None),
                     "audited_at": getattr(oa, "audited_at", None),
                     "audited_by_user_id": getattr(oa, "audited_by_user_id", None),
+                    "review_status": oa.review_status.value,
                 }
 
                 write_audit_log(

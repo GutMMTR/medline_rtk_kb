@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import enum
-from datetime import datetime
+from datetime import date, datetime
 
-from sqlalchemy import Boolean, DateTime, Enum, Float, ForeignKey, Integer, LargeBinary, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, Date, DateTime, Enum, Float, ForeignKey, Integer, LargeBinary, String, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -21,6 +21,53 @@ class OrgArtifactStatus(str, enum.Enum):
     uploaded = "uploaded"
 
 
+class OrgArtifactReviewStatus(str, enum.Enum):
+    pending = "pending"
+    approved = "approved"
+    needs_correction = "needs_correction"
+
+
+class AuditPeriod(Base):
+    __tablename__ = "audit_periods"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    code: Mapped[str] = mapped_column(String(32), unique=True, nullable=False)
+    name: Mapped[str] = mapped_column(String(255), nullable=False, default="")
+    date_from: Mapped[date] = mapped_column(Date, nullable=False)
+    date_to: Mapped[date] = mapped_column(Date, nullable=False)
+    sort_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0, index=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, index=True)
+
+
+class ArtifactLevel(Base):
+    __tablename__ = "artifact_levels"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    code: Mapped[str] = mapped_column(String(32), unique=True, nullable=False)
+    name: Mapped[str] = mapped_column(String(255), nullable=False, default="")
+    sort_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0, index=True)
+    color: Mapped[str] = mapped_column(String(32), nullable=False, default="#64748b")
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, index=True)
+
+    items: Mapped[list["ArtifactLevelItem"]] = relationship(
+        back_populates="level",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+
+
+class ArtifactLevelItem(Base):
+    __tablename__ = "artifact_level_items"
+    __table_args__ = (UniqueConstraint("level_id", "artifact_id", name="uq_artifact_level_item"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    level_id: Mapped[int] = mapped_column(ForeignKey("artifact_levels.id", ondelete="CASCADE"), nullable=False, index=True)
+    artifact_id: Mapped[int] = mapped_column(ForeignKey("artifacts.id", ondelete="CASCADE"), nullable=False, index=True)
+
+    level: Mapped[ArtifactLevel] = relationship(back_populates="items")
+    artifact: Mapped["Artifact"] = relationship()
+
+
 class Organization(Base):
     __tablename__ = "organizations"
 
@@ -32,7 +79,12 @@ class Organization(Base):
     created_by_user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     created_via: Mapped[str] = mapped_column(String(32), nullable=False, default="manual")  # manual|nextcloud|system
 
+    audit_period_id: Mapped[int | None] = mapped_column(ForeignKey("audit_periods.id", ondelete="SET NULL"), nullable=True)
+    artifact_level_id: Mapped[int | None] = mapped_column(ForeignKey("artifact_levels.id", ondelete="SET NULL"), nullable=True)
+
     created_by: Mapped["User | None"] = relationship(foreign_keys=[created_by_user_id])
+    audit_period: Mapped["AuditPeriod | None"] = relationship(foreign_keys=[audit_period_id])
+    artifact_level: Mapped["ArtifactLevel | None"] = relationship(foreign_keys=[artifact_level_id])
 
 
 class User(Base):
@@ -125,6 +177,13 @@ class OrgArtifact(Base):
     audited_file_version_id: Mapped[int | None] = mapped_column(ForeignKey("file_versions.id", ondelete="SET NULL"), nullable=True)
     audited_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     audited_by_user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+
+    # Статус проверки со стороны аудитора (в т.ч. "вернул на корректировку").
+    review_status: Mapped[OrgArtifactReviewStatus] = mapped_column(
+        Enum(OrgArtifactReviewStatus, name="org_artifact_review_status"),
+        nullable=False,
+        default=OrgArtifactReviewStatus.pending,
+    )
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)

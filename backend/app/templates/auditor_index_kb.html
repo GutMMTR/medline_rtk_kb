@@ -18,6 +18,14 @@
               <option value="{{ o.id }}" {% if o.id == selected_org_id %}selected{% endif %}>{{ o.name }}</option>
             {% endfor %}
           </select>
+          {% if periods is defined and periods and selected_org_id %}
+            <label style="margin:0">Период</label>
+            <select name="period_id" onchange="this.form.submit()" style="width: 280px;">
+              {% for p in periods %}
+                <option value="{{ p.id }}" {% if p.id == selected_period_id %}selected{% endif %}>{{ p.name }} ({{ p.date_from|d }} — {{ p.date_to|d }})</option>
+              {% endfor %}
+            </select>
+          {% endif %}
         </form>
       {% endif %}
       <a class="btn btn-secondary" href="{% if selected_org_id %}{{ _art }}?org_id={{ selected_org_id }}{% else %}{{ _art }}{% endif %}">Артефакты</a>
@@ -45,7 +53,7 @@
         {% for s in sheet_names %}
           {% if s == "Управление ИБ" %}
             {% if selected_org_id and (s in _avail) %}
-              <a class="admin-tile" href="{{ _base }}/index-kb/uib?org_id={{ selected_org_id }}">
+              <a class="admin-tile" href="{{ _base }}/index-kb/uib?org_id={{ selected_org_id }}{% if selected_period_id %}&period_id={{ selected_period_id }}{% endif %}">
                 <div class="admin-tile-icon">
                   <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" focusable="false">
                     <path fill="currentColor" d="M7 2h10v2H7V2zm-2 4h14v16H5V6zm3 3h8v2H8V9zm0 4h8v2H8v-2zm0 4h6v2H8v-2z"/>
@@ -71,7 +79,7 @@
             {% endif %}
           {% elif s == "СЗИ" %}
             {% if selected_org_id and (s in _avail) %}
-              <a class="admin-tile" href="{{ _base }}/index-kb/szi?org_id={{ selected_org_id }}">
+              <a class="admin-tile" href="{{ _base }}/index-kb/szi?org_id={{ selected_org_id }}{% if selected_period_id %}&period_id={{ selected_period_id }}{% endif %}">
                 <div class="admin-tile-icon">
                   <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" focusable="false">
                     <path fill="currentColor" d="M6 2h9l3 3v17H6V2zm8 1v4h4"/>

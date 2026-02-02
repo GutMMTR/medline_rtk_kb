@@ -69,6 +69,7 @@
         <select name="audit">
           <option value="" {% if not audit %}selected{% endif %}>(все)</option>
           <option value="needs" {% if audit == "needs" %}selected{% endif %}>Требует аудита</option>
+          <option value="needs_correction" {% if audit == "needs_correction" %}selected{% endif %}>Требует корректировки</option>
           <option value="audited" {% if audit == "audited" %}selected{% endif %}>Проаудировано</option>
           <option value="changed" {% if audit == "changed" %}selected{% endif %}>Изменён</option>
         </select>
@@ -79,6 +80,23 @@
       </div>
       <div class="filter-actions">
         <button class="btn" type="submit">Применить фильтры</button>
+      </div>
+      <div class="filter-meta">
+        {% if org_level %}
+          <span class="muted filter-meta__nowrap">Уровень: <b>{{ org_level.name }}</b></span>
+        {% endif %}
+        <label class="muted filter-meta__nowrap filter-meta__label">
+          <span>Период</span>
+          <select name="period_id" onchange="this.form.submit()" style="width: 260px;">
+            {% for p in periods %}
+              <option value="{{ p.id }}" {% if p.id == selected_period_id %}selected{% endif %}>{{ p.name }} ({{ p.date_from|d }} — {{ p.date_to|d }})</option>
+            {% endfor %}
+          </select>
+        </label>
+        <label class="filter-meta__label filter-meta__nowrap" style="user-select:none">
+          <input type="checkbox" name="in_period" value="1" {% if in_period %}checked{% endif %} onchange="this.form.submit()" />
+          <span>Только загруженные в период</span>
+        </label>
       </div>
     </form>
   </div>
@@ -153,8 +171,8 @@
                 {% endif %}
               </td>
               <td class="mono cell-wrap">
-                {% if r.fv %}
-                  v{{ r.fv.version_no }} · {{ r.fv.original_filename }}
+                {% if r.fv_period %}
+                  v{{ r.fv_period.version_no }} · {{ r.fv_period.original_filename }}
                 {% else %}
                   —
                 {% endif %}
@@ -195,7 +213,15 @@
             </tr>
           {% endfor %}
           {% if rows|length == 0 %}
-            <tr><td colspan="12" class="muted">Нет артефактов. Попросите администратора импортировать справочник.</td></tr>
+            <tr>
+              <td colspan="12" class="muted">
+                {% if in_period %}
+                  В выбранном периоде нет загруженных файлов (или загрузки не попали в период).
+                {% else %}
+                  Нет артефактов по выбранным фильтрам.
+                {% endif %}
+              </td>
+            </tr>
           {% endif %}
         </tbody>
       </table>
@@ -241,6 +267,10 @@
         <input type="hidden" name="short_name" value="{{ short_name or '' }}" />
         <input type="hidden" name="q" value="{{ q or '' }}" />
         <input type="hidden" name="status" value="{{ status or '' }}" />
+        <input type="hidden" name="period_id" value="{{ selected_period_id }}" />
+        {% if in_period %}
+          <input type="hidden" name="in_period" value="1" />
+        {% endif %}
         <label style="margin:0">Строк на страницу</label>
         <select name="page_size" onchange="this.form.page.value=1; this.form.submit()" style="width: 140px;">
           {% for s in [10,20,50,100,200] %}

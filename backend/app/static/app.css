@@ -64,6 +64,39 @@ th { color:#344054; font-size: 12px; text-transform: uppercase; letter-spacing: 
 .filter-form > .filter-actions { flex-direction: row; }
 .filter-actions .btn { height: 40px; padding: 0 14px; line-height: 38px; }
 
+/* Filter meta row (period/level/in_period checkbox) */
+.filter-meta{
+  grid-column: 1 / -1;
+  display:flex;
+  justify-content:flex-end;
+  gap: 12px;
+  align-items:center;
+  flex-wrap: wrap;
+  margin-top: -6px;
+}
+/* override .filter-form > div { flex-direction: column } */
+.filter-form > .filter-meta{
+  flex-direction: row;
+}
+.filter-meta__label{
+  display:inline-flex;
+  align-items:center;
+  gap: 8px;
+  margin: 0;
+}
+.filter-meta__nowrap{ white-space: nowrap; }
+
+@media (min-width: 1200px) {
+  .filter-meta{
+    flex-wrap: nowrap;
+    gap: 18px;
+    margin-top: 0;
+  }
+}
+
+/* Don't stretch checkbox controls to full width */
+input[type="checkbox"]{ width: auto; padding: 0; }
+
 /* Filters: on narrow screens keep the action button on a separate row */
 .filter-form--status > .filter-actions,
 .filter-form--nostatus > .filter-actions { grid-column: 1 / -1; }

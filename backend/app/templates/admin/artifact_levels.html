@@ -1,0 +1,97 @@
+{% extends "base.html" %}
+{% block content %}
+  <div class="section-header">
+    <div>
+      <h2 style="margin:0">Уровни</h2>
+      <div class="muted">Справочник уровней (наборы артефактов). Организации выбирают уровень, заказчик видит только его effective‑набор.</div>
+    </div>
+    <div class="row-right">
+      <a class="btn btn-secondary" href="/admin">В админку</a>
+    </div>
+  </div>
+
+  {% if error %}
+    <div class="card"><div class="error">{{ error }}</div></div>
+  {% endif %}
+
+  <div class="card">
+    <h3 style="margin-top:0">Добавить</h3>
+    <form method="post" action="/admin/artifact-levels" class="grid" style="grid-template-columns: 160px 1fr 160px 160px 160px;">
+      <div>
+        <label>Код</label>
+        <input name="code" placeholder="L1" required />
+      </div>
+      <div>
+        <label>Название</label>
+        <input name="name" placeholder="Уровень 1" required />
+      </div>
+      <div>
+        <label>Сортировка</label>
+        <input name="sort_order" type="number" value="0" />
+      </div>
+      <div>
+        <label>Цвет</label>
+        <input name="color" value="#64748b" />
+      </div>
+      <div>
+        <label>Активен</label>
+        <select name="is_active">
+          <option value="1" selected>Да</option>
+          <option value="0">Нет</option>
+        </select>
+      </div>
+      <div class="filter-actions" style="grid-column: 1 / -1">
+        <button class="btn" type="submit">Создать</button>
+      </div>
+    </form>
+  </div>
+
+  <div class="card">
+    <h3 style="margin-top:0">Список</h3>
+    <div class="table-wrap">
+      <table class="table">
+        <thead>
+          <tr>
+            <th>Код</th>
+            <th>Название</th>
+            <th>Сорт</th>
+            <th>Цвет</th>
+            <th>Активен</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for l in levels %}
+            <tr>
+              <td class="mono">{{ l.code }}</td>
+              <td>
+                <form method="post" action="/admin/artifact-levels/{{ l.id }}" class="row-right" style="justify-content:flex-start; gap:8px">
+                  <input name="name" value="{{ l.name }}" required style="min-width:260px" />
+                  <input name="sort_order" type="number" value="{{ l.sort_order }}" style="width:110px" />
+                  <input name="color" value="{{ l.color }}" style="width:140px" />
+                  <select name="is_active" style="width:120px">
+                    <option value="1" {% if l.is_active %}selected{% endif %}>Да</option>
+                    <option value="0" {% if not l.is_active %}selected{% endif %}>Нет</option>
+                  </select>
+                  <button class="btn btn-secondary" type="submit">Сохранить</button>
+                </form>
+              </td>
+              <td class="mono">{{ l.sort_order }}</td>
+              <td>
+                <span class="badge" style="background: {{ l.color }}; border-color: {{ l.color }}; color:#fff">{{ l.color }}</span>
+              </td>
+              <td>{% if l.is_active %}<span class="badge">Да</span>{% else %}<span class="badge badge-neutral">Нет</span>{% endif %}</td>
+              <td>
+                <a class="btn btn-secondary" href="/admin/artifact-levels/{{ l.id }}">Наполнение</a>
+              </td>
+            </tr>
+          {% endfor %}
+          {% if levels|length == 0 %}
+            <tr><td colspan="6" class="muted">Нет уровней.</td></tr>
+          {% endif %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+{% endblock %}
+

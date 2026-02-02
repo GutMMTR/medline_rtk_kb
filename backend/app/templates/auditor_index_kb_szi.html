@@ -17,16 +17,25 @@
       {% if show_org_selector is not defined or show_org_selector %}
         <form method="get" action="{{ _base }}/index-kb/szi" class="header-inline-form {% if org_picker_error %}org-picker--error{% endif %}">
           <label style="margin:0">Организация</label>
-          <select name="org_id" onchange="this.form.submit()" data-org-autocomplete="1" data-auto-submit="1" data-placeholder="Поиск организации…">
+          <select name="org_id" onchange="this.form.submit()" data-org-autocomplete="1" data-auto-submit="1" data-placeholder="">
             <option value="" {% if not selected_org_id %}selected{% endif %}></option>
             {% for o in orgs %}
               <option value="{{ o.id }}" {% if o.id == selected_org_id %}selected{% endif %}>{{ o.name }}</option>
             {% endfor %}
           </select>
+
+          {% if periods is defined and periods and selected_org_id %}
+            <label style="margin:0">Период</label>
+            <select name="period_id" onchange="this.form.submit()" style="width: 280px;">
+              {% for p in periods %}
+                <option value="{{ p.id }}" {% if p.id == selected_period_id %}selected{% endif %}>{{ p.name }} ({{ p.date_from|d }} — {{ p.date_to|d }})</option>
+              {% endfor %}
+            </select>
+          {% endif %}
         </form>
       {% endif %}
       {% if selected_org_id %}
-        <a class="btn btn-secondary" href="{{ _base }}/index-kb/szi/export.xlsx?org_id={{ selected_org_id }}">Выгрузить Excel</a>
+        <a class="btn btn-secondary" href="{{ _base }}/index-kb/szi/export.xlsx?org_id={{ selected_org_id }}{% if selected_period_id %}&period_id={{ selected_period_id }}{% endif %}">Выгрузить Excel</a>
         <a class="btn btn-secondary" href="{{ _base }}/index-kb?org_id={{ selected_org_id }}&sheet={{ sheet_name }}" title="Вернуться к основной странице Индекса КБ (Excel-вид)">Индекс КБ</a>
         <a class="btn btn-secondary" href="{{ _art }}?org_id={{ selected_org_id }}">Артефакты</a>
         <a class="btn btn-secondary" href="{{ _files }}?org_id={{ selected_org_id }}">Файлы</a>

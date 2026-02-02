@@ -9,7 +9,7 @@
       <form method="get" action="/auditor/files" class="header-inline-form">
         <input type="hidden" name="path" value="{{ path or '' }}" />
         <label style="margin:0">Организация</label>
-        <select name="org_id" onchange="this.form.submit()" data-org-autocomplete="1" data-auto-submit="1" data-placeholder="Поиск организации…">
+        <select name="org_id" onchange="this.form.submit()" data-org-autocomplete="1" data-auto-submit="1" data-placeholder="">
           {% for o in orgs %}
             <option value="{{ o.id }}" {% if o.id == selected_org_id %}selected{% endif %}>{{ o.name }}</option>
           {% endfor %}
@@ -78,7 +78,9 @@
                 <td class="col-status">
                   {% if not r.oa.current_file_version_id %}
                     <span class="badge badge-danger">Нет файла</span>
-                  {% elif r.oa.audited_file_version_id and r.oa.audited_file_version_id == r.oa.current_file_version_id %}
+                  {% elif r.oa.review_status.value == "needs_correction" %}
+                    <span class="badge badge-danger">Требует корректировки</span>
+                  {% elif r.oa.review_status.value == "approved" and r.oa.audited_file_version_id and r.oa.audited_file_version_id == r.oa.current_file_version_id %}
                     <span class="badge">Проаудировано</span>
                   {% elif r.oa.audited_file_version_id %}
                     <span class="badge badge-warn">Изменён</span>

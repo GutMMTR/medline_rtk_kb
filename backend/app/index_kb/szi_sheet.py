@@ -4,15 +4,27 @@ import os
 import re
 import time
 import zipfile
-from xml.etree import ElementTree as ET
 from dataclasses import dataclass
+from datetime import date, datetime, timedelta
 from functools import lru_cache
+from xml.etree import ElementTree as ET
 
 from sqlalchemy import and_, case, func
-from sqlalchemy.orm import joinedload
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 
-from app.db.models import Artifact, IndexKbManualValue, IndexKbTemplateRow, OrgArtifact, Organization, User
+from app.db.models import (
+    Artifact,
+    ArtifactLevel,
+    ArtifactLevelItem,
+    AuditPeriod,
+    FileVersion,
+    IndexKbManualValue,
+    IndexKbTemplateRow,
+    OrgArtifact,
+    OrgArtifactReviewStatus,
+    Organization,
+    User,
+)
 
 
 SZI_SHEET_NAME = "СЗИ"
@@ -407,53 +419,161 @@ def ensure_szi_template_loaded(db: Session, *, template_path: str | None, force:
 
 
 def compute_auto_scores(db: Session, org_id: int, short_names: list[str]) -> dict[str, float]:
+    raise RuntimeError("use compute_auto_scores_v2()")
+
+
+def _period_bounds_utc(*, date_from: date, date_to: date) -> tuple[datetime, datetime]:
+    start = datetime.combine(date_from, datetime.min.time())
+    end = datetime.combine(date_to, datetime.min.time()) + timedelta(days=1)
+    return start, end
+
+
+def _get_selected_period_bounds(
+    db: Session,
+    *,
+    org: Organization,
+    period_id: int | None,
+) -> tuple[AuditPeriod | None, datetime | None, datetime | None]:
+    pid = int(period_id or 0) or int(getattr(org, "audit_period_id", 0) or 0)
+    if not pid:
+        return None, None, None
+    ap = db.get(AuditPeriod, pid)
+    if not ap:
+        return None, None, None
+    df = getattr(ap, "date_from", None)
+    dt = getattr(ap, "date_to", None)
+    if not df or not dt:
+        return ap, None, None
+    try:
+        start, end = _period_bounds_utc(date_from=df, date_to=dt)
+        return ap, start, end
+    except Exception:
+        return ap, None, None
+
+
+def _allowed_artifact_ids_subquery(db: Session, *, org: Organization):
+    level_id = getattr(org, "artifact_level_id", None)
+    if not level_id:
+        return None
+    lvl = db.get(ArtifactLevel, int(level_id))
+    if not lvl:
+        return None
+    return (
+        db.query(ArtifactLevelItem.artifact_id)
+        .join(ArtifactLevel, ArtifactLevel.id == ArtifactLevelItem.level_id)
+        .filter(ArtifactLevel.sort_order <= lvl.sort_order)
+        .subquery()
+    )
+
+
+def compute_auto_scores_v2(
+    db: Session,
+    *,
+    org: Organization,
+    short_names: list[str],
+    period_id: int | None,
+) -> tuple[dict[str, float], set[str], set[str]]:
     """
-    Auto-score rule (requested):
-    - if artifact exists and all points are AUDITED (audited_file_version_id == current_file_version_id) => 5
-    - else => 0
+    Auto-score:
+    - only artifacts within org effective level
+    - for selected calendar period:
+      - take latest uploaded version in the period per org_artifact
+      - 5 only if that version is audited (approved) in the same period
     """
     if not short_names:
-        return {}
+        return {}, set(), set()
     sns = sorted({s.upper() for s in short_names if s})
 
-    # Map artifact short_name -> id first, to avoid heavy join on large OrgArtifact tables.
     art_rows = (
         db.query(Artifact.id, func.upper(Artifact.short_name).label("sn_u"))
         .filter(Artifact.short_name != "", func.upper(Artifact.short_name).in_(sns))
         .all()
     )
     if not art_rows:
-        return {}
+        return {}, set(), set()
     id_to_sn: dict[int, str] = {int(aid): str(sn_u).upper() for (aid, sn_u) in art_rows if aid and sn_u}
-    existing = set(id_to_sn.values())
-    artifact_ids = sorted(id_to_sn.keys())
+    existing_all = set(id_to_sn.values())
+    artifact_ids_all = sorted(id_to_sn.keys())
 
-    audited_flag = case(
-        (
-            and_(
-                OrgArtifact.current_file_version_id.isnot(None),
-                OrgArtifact.audited_file_version_id.isnot(None),
-                OrgArtifact.audited_file_version_id == OrgArtifact.current_file_version_id,
+    allowed_sub = _allowed_artifact_ids_subquery(db, org=org)
+    if allowed_sub is not None:
+        allowed_ids = {
+            int(aid)
+            for (aid,) in db.query(Artifact.id)
+            .filter(Artifact.id.in_(artifact_ids_all), Artifact.id.in_(allowed_sub))
+            .all()
+            if aid
+        }
+    else:
+        allowed_ids = set(artifact_ids_all)
+    artifact_ids = sorted(allowed_ids)
+    existing_allowed = {id_to_sn[i] for i in artifact_ids if i in id_to_sn}
+    excluded = set(existing_all) - set(existing_allowed)
+    if not artifact_ids:
+        return {}, excluded, set()
+
+    _, p_start, p_end = _get_selected_period_bounds(db, org=org, period_id=period_id)
+    if p_start and p_end:
+        sub = (
+            db.query(
+                FileVersion.org_artifact_id.label("oa_id"),
+                func.max(FileVersion.id).label("fv_id"),
+            )
+            .filter(FileVersion.created_at >= p_start, FileVersion.created_at < p_end)
+            .group_by(FileVersion.org_artifact_id)
+            .subquery()
+        )
+        audited_flag = case(
+            (
+                and_(
+                    sub.c.fv_id.isnot(None),
+                    OrgArtifact.audited_file_version_id.isnot(None),
+                    OrgArtifact.audited_file_version_id == sub.c.fv_id,
+                    OrgArtifact.review_status == OrgArtifactReviewStatus.approved,
+                    OrgArtifact.audited_at.isnot(None),
+                    OrgArtifact.audited_at >= p_start,
+                    OrgArtifact.audited_at < p_end,
+                ),
+                1,
             ),
-            1,
-        ),
-        else_=0,
-    )
-    rows = (
-        db.query(OrgArtifact.artifact_id.label("aid"), func.min(audited_flag).label("all_audited"))
-        .filter(OrgArtifact.org_id == org_id, OrgArtifact.artifact_id.in_(artifact_ids))
-        .group_by(OrgArtifact.artifact_id)
-        .all()
-    )
+            else_=0,
+        )
+        rows = (
+            db.query(OrgArtifact.artifact_id.label("aid"), func.min(audited_flag).label("all_audited"))
+            .outerjoin(sub, sub.c.oa_id == OrgArtifact.id)
+            .filter(OrgArtifact.org_id == int(org.id), OrgArtifact.artifact_id.in_(artifact_ids))
+            .group_by(OrgArtifact.artifact_id)
+            .all()
+        )
+    else:
+        audited_flag = case(
+            (
+                and_(
+                    OrgArtifact.current_file_version_id.isnot(None),
+                    OrgArtifact.audited_file_version_id.isnot(None),
+                    OrgArtifact.audited_file_version_id == OrgArtifact.current_file_version_id,
+                    OrgArtifact.review_status == OrgArtifactReviewStatus.approved,
+                ),
+                1,
+            ),
+            else_=0,
+        )
+        rows = (
+            db.query(OrgArtifact.artifact_id.label("aid"), func.min(audited_flag).label("all_audited"))
+            .filter(OrgArtifact.org_id == int(org.id), OrgArtifact.artifact_id.in_(artifact_ids))
+            .group_by(OrgArtifact.artifact_id)
+            .all()
+        )
+
     out: dict[str, float] = {}
     for aid, all_audited in rows:
         sn_u = id_to_sn.get(int(aid or 0))
         if not sn_u:
             continue
         out[sn_u] = 5.0 if int(all_audited or 0) == 1 else 0.0
-    for sn_u in existing:
+    for sn_u in existing_allowed:
         out.setdefault(sn_u, 0.0)
-    return out
+    return out, excluded, set(existing_allowed)
 
 
 def load_manual_values(db: Session, org_id: int, sheet_name: str) -> dict[str, IndexKbManualValue]:
@@ -521,7 +641,13 @@ def compute_szi_summary(rows: list[SziRowView]) -> list[SziSummaryRow]:
     return out
 
 
-def build_szi_view(db: Session, *, org_id: int, actor: User) -> tuple[Organization, SziTemplate, list[SziRowView]]:
+def build_szi_view(
+    db: Session,
+    *,
+    org_id: int,
+    actor: User,
+    period_id: int | None = None,
+) -> tuple[Organization, SziTemplate, list[SziRowView]]:
     org = db.get(Organization, org_id)
     if not org:
         raise RuntimeError("Организация не найдена")
@@ -539,21 +665,21 @@ def build_szi_view(db: Session, *, org_id: int, actor: User) -> tuple[Organizati
         _SZI_AUTO_CACHE
     except NameError:
         _SZI_AUTO_CACHE = {}  # type: ignore[var-annotated]
-    cache_key = (int(org_id), int(tpl.mtime_ns))
+    cache_key = (int(org_id), int(tpl.mtime_ns), int(period_id or 0), int(getattr(org, "audit_period_id", 0) or 0))
     now = time.time()
     cached = _SZI_AUTO_CACHE.get(cache_key)  # type: ignore[name-defined]
     if cached and (now - float(cached[0])) < 15.0:
-        auto = cached[1]
+        auto, excluded = cached[1], cached[2]
     else:
-        auto = compute_auto_scores(db, org_id, short_names)
-        _SZI_AUTO_CACHE[cache_key] = (now, auto)  # type: ignore[name-defined]
+        auto, excluded, _existing_allowed = compute_auto_scores_v2(db, org=org, short_names=short_names, period_id=period_id)
+        _SZI_AUTO_CACHE[cache_key] = (now, auto, excluded)  # type: ignore[name-defined]
 
     manual = load_manual_values(db, org_id, SZI_SHEET_NAME)
     # Tokens present on the sheet but missing in Artifact справочнике.
     # We still show them (as before), but mark explicitly.
     sn_all = {s.upper() for s in short_names if s}
     sn_have = {k.upper() for k in (auto or {}).keys()}
-    sn_missing_artifact = sn_all - sn_have
+    sn_missing_artifact = sn_all - sn_have - set(excluded)
 
     out: list[SziRowView] = []
     for r in tpl.rows:
@@ -562,6 +688,9 @@ def build_szi_view(db: Session, *, org_id: int, actor: User) -> tuple[Organizati
             continue
         key = r.row_key
         sn_u = r.short_name.upper()
+        if sn_u in excluded:
+            out.append(SziRowView(row=r, is_auto=True, value=None, source="вне уровня", updated_at=None, updated_by=""))
+            continue
         if sn_u in auto:
             out.append(SziRowView(row=r, is_auto=True, value=auto[sn_u], source="auto", updated_at=None, updated_by=""))
             continue

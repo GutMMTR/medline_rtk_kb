@@ -9,15 +9,7 @@ from sqlalchemy.orm import Session
 
 from app.audit.service import write_audit_log
 from app.core.config import settings
-from app.db.models import (
-    Artifact,
-    FileVersion,
-    NextcloudRemoteFileState,
-    OrgArtifact,
-    OrgArtifactStatus,
-    Organization,
-    User,
-)
+from app.db.models import Artifact, ArtifactLevel, AuditPeriod, FileVersion, NextcloudRemoteFileState, OrgArtifact, OrgArtifactReviewStatus, OrgArtifactStatus, Organization, User
 from app.integrations.nextcloud_dav import NextcloudDavClient
 
 
@@ -168,7 +160,14 @@ def _ensure_org(db: Session, org_name: str, create_orgs: bool) -> Organization |
         return org
     if not create_orgs:
         return None
-    org = Organization(name=org_name, created_via="nextcloud")
+    ap_id = db.query(AuditPeriod.id).filter(AuditPeriod.code == "P365").scalar()
+    lvl_id = db.query(ArtifactLevel.id).filter(ArtifactLevel.code == "L3").scalar()
+    org = Organization(
+        name=org_name,
+        created_via="nextcloud",
+        audit_period_id=int(ap_id) if ap_id else None,
+        artifact_level_id=int(lvl_id) if lvl_id else None,
+    )
     db.add(org)
     db.flush()
     return org
@@ -313,6 +312,7 @@ def sync_from_nextcloud(
                     "audited_file_version_id": getattr(oa, "audited_file_version_id", None),
                     "audited_at": getattr(oa, "audited_at", None).isoformat() if getattr(oa, "audited_at", None) else None,
                     "audited_by_user_id": getattr(oa, "audited_by_user_id", None),
+                    "review_status": getattr(oa, "review_status", None).value if getattr(oa, "review_status", None) else None,
                 }
                 oa.status = OrgArtifactStatus.uploaded
                 oa.current_file_version_id = fv.id
@@ -322,12 +322,14 @@ def sync_from_nextcloud(
                 oa.audited_file_version_id = None
                 oa.audited_at = None
                 oa.audited_by_user_id = None
+                oa.review_status = OrgArtifactReviewStatus.pending
                 after = {
                     "status": oa.status.value,
                     "current_file_version_id": oa.current_file_version_id,
                     "audited_file_version_id": getattr(oa, "audited_file_version_id", None),
                     "audited_at": getattr(oa, "audited_at", None),
                     "audited_by_user_id": getattr(oa, "audited_by_user_id", None),
+                    "review_status": oa.review_status.value,
                 }
 
                 write_audit_log(
@@ -639,6 +641,7 @@ def sync_from_nextcloud_v2(
                     "audited_file_version_id": getattr(oa, "audited_file_version_id", None),
                     "audited_at": getattr(oa, "audited_at", None).isoformat() if getattr(oa, "audited_at", None) else None,
                     "audited_by_user_id": getattr(oa, "audited_by_user_id", None),
+                    "review_status": getattr(oa, "review_status", None).value if getattr(oa, "review_status", None) else None,
                 }
                 oa.status = OrgArtifactStatus.uploaded
                 oa.current_file_version_id = fv.id
@@ -648,12 +651,14 @@ def sync_from_nextcloud_v2(
                 oa.audited_file_version_id = None
                 oa.audited_at = None
                 oa.audited_by_user_id = None
+                oa.review_status = OrgArtifactReviewStatus.pending
                 after = {
                     "status": oa.status.value,
                     "current_file_version_id": oa.current_file_version_id,
                     "audited_file_version_id": getattr(oa, "audited_file_version_id", None),
                     "audited_at": getattr(oa, "audited_at", None),
                     "audited_by_user_id": getattr(oa, "audited_by_user_id", None),
+                    "review_status": oa.review_status.value,
                 }
 
                 write_audit_log(
