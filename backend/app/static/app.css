@@ -3,6 +3,7 @@
   --rtk-purple: #6B2DFF;
   --rtk-purple-2: #5B2EFF;
   --rtk-orange: #FF4F12;
+  --danger: #b42318;
   --bg: #F6F7FB;
   --panel: #FFFFFF;
   --text: #101828;
@@ -206,7 +207,7 @@ input[type="checkbox"]{ width: auto; padding: 0; }
 .td-actions-wide { width: 96px; text-align: right; vertical-align: middle; }
 .td-actions-wide .row-right { justify-content:flex-end; }
 .td-actions-wide .row-right { align-items: center; gap: 8px; }
-.icon-btn { display:inline-flex; align-items:center; justify-content:center; width: 36px; height: 32px; border-radius: 8px; border: 1px solid #d0d5dd; background:#fff; color:#101828; text-decoration:none; }
+.icon-btn { position: relative; display:inline-flex; align-items:center; justify-content:center; width: 36px; height: 32px; border-radius: 8px; border: 1px solid #d0d5dd; background:#fff; color:#101828; text-decoration:none; }
 .icon-btn:hover { background:#f2f4f7; }
 .icon-danger { color: #b42318; border-color: #fda29b; }
 .icon-danger:hover { background:#fee4e2; }
@@ -216,6 +217,124 @@ input[type="checkbox"]{ width: auto; padding: 0; }
 .icon-warn:hover { background: rgba(247,144,9,.12); }
 /* Optional: keep for other icon images (if any), but SVG is preferred for consistent styling */
 .icon-btn .icon-img { width: 18px; height: 18px; display:block; }
+
+/* Unread counter as "mobile-style" overlay on icon button */
+.icon-btn__badge{
+  position: absolute;
+  top: -7px;
+  right: -7px;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 6px;
+  border-radius: 999px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  line-height: 18px;
+  font-weight: 800;
+  background: var(--danger);
+  color: #fff;
+  border: 2px solid #fff;
+  box-shadow: 0 6px 14px rgba(16,24,40,.14);
+  pointer-events: none;
+}
+
+/* Chat (MVP) */
+.chat-layout{
+  display:grid;
+  grid-template-columns: 320px 1fr;
+  gap: 12px;
+  align-items: start;
+}
+.chat-side{ padding: 14px; position: sticky; top: 12px; }
+.chat-nav{ display:flex; flex-direction: column; gap: 6px; }
+.chat-nav__item{
+  display:flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 10px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  text-decoration: none;
+  color: inherit;
+  background: #fff;
+}
+.chat-nav__item:hover{ border-color: rgba(107,45,255,.35); }
+.chat-nav__item--active{
+  border-color: rgba(107,45,255,.35);
+  background: rgba(107,45,255,.04);
+}
+.chat-nav__title{ font-size: 13px; line-height: 1.25; overflow:hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 240px; }
+.chat-card{ padding: 14px; }
+.chat-list{
+  height: 420px;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: #fff;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.chat-msg{
+  max-width: min(740px, 78%);
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 16px 16px 16px 8px; /* left bubble */
+  background: #f8fafc;
+  margin: 0;
+  align-self: flex-start;
+}
+.chat-msg--mine{
+  align-self: flex-end;
+  border-color: rgba(107,45,255,.28);
+  background: rgba(107,45,255,.10);
+  border-radius: 16px 16px 8px 16px; /* right bubble */
+}
+.chat-msg__meta{
+  font-size: 12px;
+  color: var(--muted);
+  margin-bottom: 6px;
+}
+.chat-msg--mine .chat-msg__meta{ text-align: right; }
+.chat-msg__body{ white-space: pre-wrap; overflow-wrap: anywhere; }
+.chat-compose{
+  display:flex;
+  gap: 10px;
+  align-items: flex-end;
+  margin-top: 12px;
+}
+.chat-compose textarea{ flex: 1 1 auto; min-height: 42px; }
+
+/* Unread badges */
+.btn-badge{
+  display:inline-flex;
+  align-items:center;
+  gap:8px;
+}
+.badge-dot{
+  display:inline-flex;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 6px;
+  border-radius: 999px;
+  align-items:center;
+  justify-content:center;
+  font-size: 12px;
+  line-height: 18px;
+  font-weight: 700;
+  background: var(--danger);
+  color: #fff;
+}
+
+@media (max-width: 900px){
+  .chat-layout{ grid-template-columns: 1fr; }
+  .chat-side{ position: static; }
+  .chat-nav__title{ max-width: 100%; }
+}
 
 .upload-row { display:flex; align-items:center; gap: 10px; min-width: 0; flex-wrap: wrap; }
 .file-input { width: 260px; max-width: 100%; min-width: 0; }

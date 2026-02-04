@@ -60,6 +60,15 @@
         <h3 style="margin:0">Действия</h3>
       </div>
 
+      <div class="row-right" style="justify-content:flex-start; margin-bottom: 10px; gap: 8px;">
+        <a class="btn btn-secondary btn-badge" href="/auditor/org_artifacts/{{ oa.id }}/chat" title="Открыть чат по этому артефакту">
+          Чат по артефакту
+          {% if chat_unread_for_oa and chat_unread_for_oa > 0 %}
+            <span class="badge-dot">{{ chat_unread_for_oa }}</span>
+          {% endif %}
+        </a>
+      </div>
+
       <div style="margin-bottom: 10px">
         {% if not oa.current_file_version_id %}
           <span class="badge badge-danger">Нет файла</span>

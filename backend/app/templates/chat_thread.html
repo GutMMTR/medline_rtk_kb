@@ -1,0 +1,183 @@
+{% extends "base.html" %}
+{% block content %}
+  <div class="section-header">
+    <div>
+      <h2 style="margin:0">{{ title or "Чат" }}</h2>
+      <div class="muted">
+        Организация: <b>{{ org_name }}</b>
+        {% if artifact_label %} · Артефакт: <span class="mono">{{ artifact_label }}</span>{% endif %}
+      </div>
+    </div>
+    <div class="row-right">
+      {% if back_href %}
+        <a class="btn btn-secondary" href="{{ back_href }}">{{ back_label or "Назад" }}</a>
+      {% endif %}
+    </div>
+  </div>
+
+  <div class="chat-layout">
+    <div class="card chat-side">
+      <div class="section-header" style="padding:0; margin:0 0 10px 0">
+        <h3 style="margin:0">Чаты</h3>
+        {% if threads_unread_total and threads_unread_total > 0 %}
+          <span class="badge badge-danger">+{{ threads_unread_total }}</span>
+        {% endif %}
+      </div>
+      <div class="chat-nav">
+        {% for t in (threads_nav or []) %}
+          <a class="chat-nav__item {% if t.active %}chat-nav__item--active{% endif %}" href="{{ t.href }}">
+            <div class="chat-nav__title">{{ t.title }}</div>
+            {% if t.unread and t.unread > 0 %}
+              <span class="badge badge-danger">{{ t.unread }}</span>
+            {% endif %}
+          </a>
+        {% endfor %}
+        {% if not threads_nav or (threads_nav|length == 0) %}
+          <div class="muted">Пока нет чатов.</div>
+        {% endif %}
+      </div>
+    </div>
+
+    <div class="card chat-card" data-thread-id="{{ thread_id }}">
+      <div id="chat_list" class="chat-list" aria-live="polite"></div>
+
+      <div class="chat-compose">
+        <textarea id="chat_body" rows="2" placeholder="Сообщение…"></textarea>
+        <button id="chat_send" class="btn" type="button">Отправить</button>
+      </div>
+      <div class="muted" style="margin-top:8px">MVP: авто‑обновление каждые 4 секунды.</div>
+    </div>
+  </div>
+
+  <script>
+    (function(){
+      const threadId = Number(document.querySelector('.chat-card')?.getAttribute('data-thread-id') || 0);
+      const me = {{ current_user_login|tojson }};
+      const list = document.getElementById('chat_list');
+      const body = document.getElementById('chat_body');
+      const sendBtn = document.getElementById('chat_send');
+      if (!threadId || !list || !body || !sendBtn) return;
+
+      let lastId = Number({{ last_message_id or 0 }}) || 0;
+      let loading = false;
+
+      function escapeText(s){ return String(s ?? ''); }
+      function fmtTs(s){
+        try{
+          const d = new Date(s);
+          if (isNaN(d.getTime())) return String(s || '');
+          const pad2 = (n)=>String(n).padStart(2,'0');
+          return d.getFullYear()+'-'+pad2(d.getMonth()+1)+'-'+pad2(d.getDate())+' '+pad2(d.getHours())+':'+pad2(d.getMinutes())+':'+pad2(d.getSeconds());
+        }catch(e){ return String(s || '');}
+      }
+
+      function renderMsg(m){
+        const wrap = document.createElement('div');
+        const mine = (m.author_login && me && String(m.author_login) === String(me));
+        wrap.className = 'chat-msg' + (mine ? ' chat-msg--mine' : '');
+
+        const meta = document.createElement('div');
+        meta.className = 'chat-msg__meta';
+        meta.textContent = `${m.author_login || '—'} · ${fmtTs(m.created_at)}`;
+
+        const txt = document.createElement('div');
+        txt.className = 'chat-msg__body';
+        txt.textContent = escapeText(m.body);
+
+        wrap.appendChild(meta);
+        wrap.appendChild(txt);
+        return wrap;
+      }
+
+      function scrollToBottom(){
+        try{ list.scrollTop = list.scrollHeight; }catch(e){}
+      }
+
+      async function markRead(id){
+        if (!id) return;
+        try{
+          await fetch(`/api/chat/threads/${threadId}/read`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'same-origin',
+            body: JSON.stringify({ last_read_message_id: id })
+          });
+        }catch(e){}
+      }
+
+      async function loadInitial(){
+        if (loading) return;
+        loading = true;
+        try{
+          const r = await fetch(`/api/chat/threads/${threadId}/messages`, { credentials: 'same-origin' });
+          const data = await r.json();
+          list.innerHTML = '';
+          for (const m of (data.messages || [])){
+            list.appendChild(renderMsg(m));
+            lastId = Math.max(lastId, Number(m.id) || 0);
+          }
+          scrollToBottom();
+          await markRead(lastId);
+        } finally {
+          loading = false;
+        }
+      }
+
+      async function poll(){
+        if (loading) return;
+        loading = true;
+        try{
+          const r = await fetch(`/api/chat/threads/${threadId}/messages?after_id=${encodeURIComponent(String(lastId || 0))}`, { credentials: 'same-origin' });
+          const data = await r.json();
+          const msgs = (data.messages || []);
+          if (msgs.length){
+            for (const m of msgs){
+              list.appendChild(renderMsg(m));
+              lastId = Math.max(lastId, Number(m.id) || 0);
+            }
+            scrollToBottom();
+            await markRead(lastId);
+          }
+        } finally {
+          loading = false;
+        }
+      }
+
+      async function send(){
+        const t = String(body.value || '').trim();
+        if (!t) return;
+        sendBtn.disabled = true;
+        try{
+          const r = await fetch(`/api/chat/threads/${threadId}/messages`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'same-origin',
+            body: JSON.stringify({ body: t })
+          });
+          const data = await r.json();
+          if (data && data.message){
+            list.appendChild(renderMsg(data.message));
+            lastId = Math.max(lastId, Number(data.message.id) || 0);
+            body.value = '';
+            scrollToBottom();
+            await markRead(lastId);
+          }
+        } finally {
+          sendBtn.disabled = false;
+        }
+      }
+
+      sendBtn.addEventListener('click', send);
+      body.addEventListener('keydown', (e)=>{
+        if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)){
+          e.preventDefault();
+          send();
+        }
+      });
+
+      loadInitial();
+      setInterval(poll, 4000);
+    })();
+  </script>
+{% endblock %}
+

@@ -16,6 +16,12 @@
         </form>
       {% endif %}
       <a class="btn btn-secondary" href="/my/index-kb?org_id={{ selected_org_id }}">Индекс ИБ</a>
+      <a class="btn btn-secondary btn-badge" href="/my/chat?org_id={{ selected_org_id }}">
+        Чат
+        {% if chat_unread_total and chat_unread_total > 0 %}
+          <span class="badge-dot">{{ chat_unread_total }}</span>
+        {% endif %}
+      </a>
       <a class="btn btn-secondary" href="/my/artifacts">К артефактам</a>
     </div>
   </div>

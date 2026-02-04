@@ -18,6 +18,12 @@
         </form>
       {% endif %}
       <a class="btn btn-secondary" href="/my/index-kb?org_id={{ selected_org_id }}">Индекс ИБ</a>
+      <a class="btn btn-secondary btn-badge" href="/my/chat?org_id={{ selected_org_id }}">
+        Чат
+        {% if chat_unread_total and chat_unread_total > 0 %}
+          <span class="badge-dot">{{ chat_unread_total }}</span>
+        {% endif %}
+      </a>
       <a class="btn btn-secondary" href="/my/files">К файлам</a>
     </div>
   </div>
@@ -194,8 +200,17 @@
                 </form>
               </td>
               <td class="td-actions-wide">
-                {% if r.oa.status.value == "uploaded" %}
-                  <div class="row-right" style="justify-content:flex-end">
+                <div class="row-right" style="justify-content:flex-end">
+                  <a class="icon-btn" href="/my/org_artifacts/{{ r.oa.id }}/chat" title="Чат по артефакту" aria-label="Чат по артефакту">
+                    <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" focusable="false">
+                      <path fill="currentColor" d="M20 2H4a2 2 0 0 0-2 2v18l4-4h14a2 2 0 0 0 2-2V4a2 2 0 0 0-2-2zm0 14H5.17L4 17.17V4h16v12z"/>
+                      <path fill="currentColor" d="M6 6h12v2H6V6zm0 4h9v2H6v-2z"/>
+                    </svg>
+                    {% if chat_unread_by_oa_id and chat_unread_by_oa_id.get(r.oa.id) %}
+                      <span class="icon-btn__badge" title="Непрочитанные: {{ chat_unread_by_oa_id.get(r.oa.id) }}">{{ chat_unread_by_oa_id.get(r.oa.id) }}</span>
+                    {% endif %}
+                  </a>
+                  {% if r.oa.status.value == "uploaded" %}
                     <a class="icon-btn" href="/my/artifacts/{{ r.oa.id }}/download{% if r.fv_period %}?fv_id={{ r.fv_period.id }}{% elif r.fv %}?fv_id={{ r.fv.id }}{% endif %}" title="Скачать" aria-label="Скачать">
                       <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" focusable="false">
                         <path fill="currentColor" d="M5 18v2h14v-2H5zM19 9h-4V3H9v6H5l7 7 7-7z"/>
@@ -208,10 +223,8 @@
                         </svg>
                       </button>
                     </form>
-                  </div>
-                {% else %}
-                  <span class="muted">—</span>
-                {% endif %}
+                  {% endif %}
+                </div>
               </td>
             </tr>
           {% endfor %}

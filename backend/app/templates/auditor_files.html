@@ -16,6 +16,12 @@
         </select>
       </form>
       <a class="btn btn-secondary" href="/auditor/artifacts?org_id={{ selected_org_id }}">Артефакты</a>
+      <a class="btn btn-secondary btn-badge" href="/auditor/chat?org_id={{ selected_org_id }}">
+        Чат
+        {% if chat_unread_total and chat_unread_total > 0 %}
+          <span class="badge-dot">{{ chat_unread_total }}</span>
+        {% endif %}
+      </a>
       <a class="btn btn-secondary" href="/auditor/dashboards?org_ids={{ selected_org_id }}">Дашборды</a>
       <a class="btn btn-secondary" href="/artifacts">Справочник</a>
     </div>

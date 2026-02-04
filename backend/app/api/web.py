@@ -21,7 +21,7 @@ from openpyxl.utils import get_column_letter
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy import and_, case, func, insert, or_, select
 import sqlalchemy as sa
-from sqlalchemy.orm import Session, aliased
+from sqlalchemy.orm import Session, aliased, joinedload
 
 from app.audit.service import write_audit_log
 from app.auth.dependencies import get_current_user, get_user_role_for_org, require_admin
@@ -47,6 +47,9 @@ from app.db.models import (
     Organization,
     Role,
     StoredFile,
+    ChatMessage,
+    ChatThread,
+    ChatThreadRead,
     User,
     UserOrgMembership,
 )
@@ -72,6 +75,110 @@ router = APIRouter()
 templates = Jinja2Templates(directory="app/templates")
 
 DEFAULT_ORG_NAME = "Default"
+
+
+def _require_chat_access(db: Session, user: User, org_id: int, *, allow_customer: bool) -> Role:
+    """
+    Чат доступен:
+    - admin: всегда
+    - auditor: как "глобальный аудитор" (см. get_user_role_for_org)
+    - customer: только для своих организаций (если allow_customer=True)
+    """
+    role = get_user_role_for_org(db, user, org_id)
+    if role == Role.admin:
+        return role
+    if role == Role.auditor:
+        return role
+    if allow_customer and role == Role.customer:
+        return role
+    raise HTTPException(status_code=403, detail="Нет доступа к чату этой организации")
+
+
+def _get_or_create_chat_thread(db: Session, *, org_id: int, org_artifact_id: int | None, actor: User) -> ChatThread:
+    q = db.query(ChatThread).filter(ChatThread.org_id == int(org_id))
+    if org_artifact_id is None:
+        q = q.filter(ChatThread.org_artifact_id.is_(None))
+    else:
+        q = q.filter(ChatThread.org_artifact_id == int(org_artifact_id))
+    t = q.one_or_none()
+    if t:
+        return t
+    t = ChatThread(org_id=int(org_id), org_artifact_id=int(org_artifact_id) if org_artifact_id else None, created_by_user_id=actor.id)
+    db.add(t)
+    db.flush()
+    return t
+
+
+def _chat_message_to_dict(m: ChatMessage) -> dict:
+    return {
+        "id": int(m.id),
+        "thread_id": int(m.thread_id),
+        "author_user_id": int(m.author_user_id) if m.author_user_id else None,
+        "author_login": (m.author.login if getattr(m, "author", None) else None),
+        "body": m.body or "",
+        # ISO for JS Date()
+        "created_at": (m.created_at.isoformat() if m.created_at else ""),
+    }
+
+
+def _get_chat_unread_for_org(
+    db: Session,
+    *,
+    user: User,
+    org_id: int,
+    only_org_artifact_ids: list[int] | None = None,
+) -> tuple[int, dict[int, int], dict[int, int]]:
+    """
+    Возвращает:
+    - total_unread: суммарно непрочитанных сообщений по организации
+    - unread_by_thread_id: {thread_id: unread_cnt}
+    - unread_by_org_artifact_id: {org_artifact_id: unread_cnt} (только для тредов по артефактам)
+    """
+    org_id = int(org_id)
+    if org_id <= 0:
+        return 0, {}, {}
+
+    t_ids_sub = db.query(ChatThread.id).filter(ChatThread.org_id == org_id)
+    if only_org_artifact_ids is not None:
+        oa_ids = [int(x) for x in only_org_artifact_ids if int(x) > 0]
+        # include "org chat" always if requested list is limited
+        t_ids_sub = t_ids_sub.filter(or_(ChatThread.org_artifact_id.is_(None), ChatThread.org_artifact_id.in_(oa_ids)))
+
+    # unread = messages with id > last_read_message_id (per user/thread) and not authored by this user
+    unread_rows = (
+        db.query(
+            ChatMessage.thread_id.label("thread_id"),
+            func.count(ChatMessage.id).label("unread_cnt"),
+        )
+        .join(ChatThread, ChatThread.id == ChatMessage.thread_id)
+        .outerjoin(
+            ChatThreadRead,
+            and_(
+                ChatThreadRead.thread_id == ChatThread.id,
+                ChatThreadRead.user_id == int(user.id),
+            ),
+        )
+        .filter(ChatMessage.thread_id.in_(t_ids_sub))
+        .filter(ChatMessage.author_user_id.is_(None) | (ChatMessage.author_user_id != int(user.id)))
+        .filter(ChatMessage.id > func.coalesce(ChatThreadRead.last_read_message_id, 0))
+        .group_by(ChatMessage.thread_id)
+        .all()
+    )
+    unread_by_thread_id = {int(tid): int(cnt) for (tid, cnt) in unread_rows}
+    total_unread = sum(unread_by_thread_id.values())
+
+    # Map thread->org_artifact_id for artifact threads
+    t_pairs = (
+        db.query(ChatThread.id, ChatThread.org_artifact_id)
+        .filter(ChatThread.id.in_(list(unread_by_thread_id.keys()) or [-1]))
+        .all()
+    )
+    unread_by_org_artifact_id: dict[int, int] = {}
+    for tid, oa_id in t_pairs:
+        if oa_id:
+            unread_by_org_artifact_id[int(oa_id)] = unread_by_thread_id.get(int(tid), 0)
+
+    return total_unread, unread_by_thread_id, unread_by_org_artifact_id
 
 # Индекс КБ: список листов/плиток как в эталонном Excel.
 # Реализованы интерактивно только "Управление ИБ" и "СЗИ", остальные помечаем как "Скоро".
@@ -688,6 +795,11 @@ def my_artifacts_page(
     end = min(total_pages, page + window)
     page_links = list(range(start, end + 1))
 
+    page_oa_ids = [int(r["oa"].id) for r in rows if r.get("oa") is not None]
+    chat_unread_total, _unread_by_thread_id, chat_unread_by_oa_id = _get_chat_unread_for_org(
+        db, user=user, org_id=int(selected_org_id), only_org_artifact_ids=page_oa_ids
+    )
+
     resp = templates.TemplateResponse(
         "customer_artifacts.html",
         {
@@ -720,6 +832,8 @@ def my_artifacts_page(
             "page": page,
             "page_size": page_size,
             "total": total,
+            "chat_unread_total": chat_unread_total,
+            "chat_unread_by_oa_id": chat_unread_by_oa_id,
             "total_pages": total_pages,
             "has_prev": page > 1,
             "has_next": offset + page_size < total,
@@ -882,6 +996,10 @@ def my_files_explorer(
         acc.append(s)
         crumbs.append({"name": s, "path": "/".join(acc)})
 
+    chat_unread_total, _unread_by_thread_id, _unread_by_oa_id = _get_chat_unread_for_org(
+        db, user=user, org_id=int(org.id), only_org_artifact_ids=None
+    )
+
     resp = templates.TemplateResponse(
         "customer_files.html",
         {
@@ -896,6 +1014,7 @@ def my_files_explorer(
             "folders": folders_sorted,
             "leaf_items": leaf_items,
             "max_upload_mb": settings.max_upload_mb,
+            "chat_unread_total": chat_unread_total,
         },
     )
     resp.headers["Cache-Control"] = "no-store, max-age=0"
@@ -1384,6 +1503,11 @@ def auditor_artifacts_page(
     end = min(total_pages, page + window)
     page_links = list(range(start, end + 1))
 
+    page_oa_ids = [int(r["oa"].id) for r in rows if r.get("oa") is not None]
+    chat_unread_total, _unread_by_thread_id, chat_unread_by_oa_id = _get_chat_unread_for_org(
+        db, user=user, org_id=int(selected_org_id), only_org_artifact_ids=page_oa_ids
+    )
+
     resp = templates.TemplateResponse(
         "auditor_artifacts.html",
         {
@@ -1423,6 +1547,8 @@ def auditor_artifacts_page(
             "page_links": page_links,
             "export_query": export_query,
             "org_level": org.artifact_level if org else None,
+            "chat_unread_total": chat_unread_total,
+            "chat_unread_by_oa_id": chat_unread_by_oa_id,
         },
     )
     resp.headers["Cache-Control"] = "no-store, max-age=0"
@@ -2116,6 +2242,10 @@ def auditor_files_explorer(
         acc.append(s)
         crumbs.append({"name": s, "path": "/".join(acc)})
 
+    chat_unread_total, _unread_by_thread_id, _unread_by_oa_id = _get_chat_unread_for_org(
+        db, user=user, org_id=int(selected_org_id), only_org_artifact_ids=None
+    )
+
     resp = templates.TemplateResponse(
         "auditor_files.html",
         {
@@ -2131,6 +2261,7 @@ def auditor_files_explorer(
             "crumbs": crumbs,
             "folders": folders_sorted,
             "leaf_items": leaf_items,
+            "chat_unread_total": chat_unread_total,
         },
     )
     resp.headers["Cache-Control"] = "no-store, max-age=0"
@@ -2175,6 +2306,12 @@ def auditor_index_kb_page(
         available_sheets.append(SZI_SHEET_NAME)
     err = None if available_sheets else "Шаблоны Индекса КБ не загружены в БД (нужны seed‑миграции)."
 
+    chat_unread_total = 0
+    if selected_org_id:
+        chat_unread_total, _unread_by_thread_id, _unread_by_oa_id = _get_chat_unread_for_org(
+            db, user=user, org_id=int(selected_org_id), only_org_artifact_ids=None
+        )
+
     resp = templates.TemplateResponse(
         "auditor_index_kb.html",
         {
@@ -2194,6 +2331,7 @@ def auditor_index_kb_page(
             "artifacts_base": "/auditor/artifacts",
             "show_org_selector": True,
             "org_picker_error": org_picker_error,
+            "chat_unread_total": chat_unread_total,
         },
     )
     resp.headers["Cache-Control"] = "no-store, max-age=0"
@@ -2237,7 +2375,11 @@ def auditor_index_kb_uib_page(
     rows: list[object] = []
     summary_rows: list[object] = []
     org = None
+    chat_unread_total = 0
     if selected_org_id:
+        chat_unread_total, _unread_by_thread_id, _unread_by_oa_id = _get_chat_unread_for_org(
+            db, user=user, org_id=int(selected_org_id), only_org_artifact_ids=None
+        )
         if not get_uib_template_from_db(db):
             resp = templates.TemplateResponse(
                 "auditor_index_kb_uib.html",
@@ -2261,6 +2403,7 @@ def auditor_index_kb_uib_page(
                     "date_from": (df.isoformat() if df else ""),
                     "date_to": (dt.isoformat() if dt else ""),
                     "date_range_error": range_err or "",
+                    "chat_unread_total": chat_unread_total,
                 },
                 status_code=200,
             )
@@ -2302,6 +2445,7 @@ def auditor_index_kb_uib_page(
             "date_from": (df.isoformat() if df else ""),
             "date_to": (dt.isoformat() if dt else ""),
             "date_range_error": range_err or "",
+            "chat_unread_total": chat_unread_total,
         },
     )
     resp.headers["Cache-Control"] = "no-store, max-age=0"
@@ -2576,7 +2720,11 @@ def auditor_index_kb_szi_page(
     org = None
     items_count = 0
     groups_count = 0
+    chat_unread_total = 0
     if selected_org_id:
+        chat_unread_total, _unread_by_thread_id, _unread_by_oa_id = _get_chat_unread_for_org(
+            db, user=user, org_id=int(selected_org_id), only_org_artifact_ids=None
+        )
         if not get_szi_template_from_db(db):
             resp = templates.TemplateResponse(
                 "auditor_index_kb_szi.html",
@@ -2600,6 +2748,7 @@ def auditor_index_kb_szi_page(
                     "date_from": (df.isoformat() if df else ""),
                     "date_to": (dt.isoformat() if dt else ""),
                     "date_range_error": range_err or "",
+                    "chat_unread_total": chat_unread_total,
                 },
                 status_code=200,
             )
@@ -2660,6 +2809,7 @@ def auditor_index_kb_szi_page(
             "date_from": (df.isoformat() if df else ""),
             "date_to": (dt.isoformat() if dt else ""),
             "date_range_error": range_err or "",
+            "chat_unread_total": chat_unread_total,
         },
     )
     resp.headers["Cache-Control"] = "no-store, max-age=0"
@@ -2739,6 +2889,366 @@ def auditor_index_kb_szi_export_xlsx(
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": cd},
     )
+
+
+# --- Chat (auditor/customer), MVP polling ---
+
+
+@router.get("/auditor/chat", response_class=HTMLResponse)
+def auditor_org_chat_page(
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+    org_id: int = 0,
+) -> HTMLResponse:
+    if int(org_id or 0) <= 0:
+        raise HTTPException(status_code=400, detail="org_id обязателен")
+    _require_chat_access(db, user, int(org_id), allow_customer=False)
+    org = db.get(Organization, int(org_id))
+    if not org:
+        raise HTTPException(status_code=404, detail="Организация не найдена")
+    t = _get_or_create_chat_thread(db, org_id=int(org_id), org_artifact_id=None, actor=user)
+    db.commit()
+    return _render_chat_thread_page(
+        request=request,
+        db=db,
+        user=user,
+        thread=t,
+        org=org,
+        artifact_label=None,
+        back_href=f"/auditor/artifacts?org_id={int(org_id)}",
+        back_label="К аудиту",
+    )
+
+
+@router.get("/auditor/org_artifacts/{org_artifact_id}/chat", response_class=HTMLResponse)
+def auditor_artifact_chat_page(
+    org_artifact_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> HTMLResponse:
+    oa = db.get(OrgArtifact, int(org_artifact_id))
+    if not oa:
+        raise HTTPException(status_code=404, detail="Артефакт организации не найден")
+    _require_chat_access(db, user, int(oa.org_id), allow_customer=False)
+    org = db.get(Organization, int(oa.org_id))
+    a = db.get(Artifact, int(oa.artifact_id))
+    label = (a.short_name if a else "") or ""
+    if a and a.title:
+        label = f"{label} · {a.title}" if label else a.title
+    t = _get_or_create_chat_thread(db, org_id=int(oa.org_id), org_artifact_id=int(oa.id), actor=user)
+    db.commit()
+    return _render_chat_thread_page(
+        request=request,
+        db=db,
+        user=user,
+        thread=t,
+        org=org,
+        artifact_label=label,
+        back_href=f"/auditor/artifacts?org_id={int(oa.org_id)}",
+        back_label="К аудиту",
+    )
+
+
+@router.get("/my/chat", response_class=HTMLResponse)
+def my_org_chat_page(
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+    org_id: int = 0,
+) -> HTMLResponse:
+    if int(org_id or 0) <= 0:
+        raise HTTPException(status_code=400, detail="org_id обязателен")
+    _require_chat_access(db, user, int(org_id), allow_customer=True)
+    org = db.get(Organization, int(org_id))
+    if not org:
+        raise HTTPException(status_code=404, detail="Организация не найдена")
+    t = _get_or_create_chat_thread(db, org_id=int(org_id), org_artifact_id=None, actor=user)
+    db.commit()
+    return _render_chat_thread_page(
+        request=request,
+        db=db,
+        user=user,
+        thread=t,
+        org=org,
+        artifact_label=None,
+        back_href=f"/my/artifacts?org_id={int(org_id)}",
+        back_label="К артефактам",
+    )
+
+
+@router.get("/my/org_artifacts/{org_artifact_id}/chat", response_class=HTMLResponse)
+def my_artifact_chat_page(
+    org_artifact_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> HTMLResponse:
+    oa = db.get(OrgArtifact, int(org_artifact_id))
+    if not oa:
+        raise HTTPException(status_code=404, detail="Артефакт организации не найден")
+    _require_chat_access(db, user, int(oa.org_id), allow_customer=True)
+    org = db.get(Organization, int(oa.org_id))
+    a = db.get(Artifact, int(oa.artifact_id))
+    label = (a.short_name if a else "") or ""
+    if a and a.title:
+        label = f"{label} · {a.title}" if label else a.title
+    t = _get_or_create_chat_thread(db, org_id=int(oa.org_id), org_artifact_id=int(oa.id), actor=user)
+    db.commit()
+    return _render_chat_thread_page(
+        request=request,
+        db=db,
+        user=user,
+        thread=t,
+        org=org,
+        artifact_label=label,
+        back_href=f"/my/artifacts?org_id={int(oa.org_id)}",
+        back_label="К артефактам",
+    )
+
+
+def _render_chat_thread_page(
+    *,
+    request: Request,
+    db: Session,
+    user: User,
+    thread: ChatThread,
+    org: Organization | None,
+    artifact_label: str | None,
+    back_href: str,
+    back_label: str,
+) -> HTMLResponse:
+    # Sidebar thread list (org chat + artifact chats)
+    all_threads = db.query(ChatThread).filter(ChatThread.org_id == int(thread.org_id)).all()
+    total_unread, unread_by_thread_id, _unread_by_oa_id = _get_chat_unread_for_org(
+        db, user=user, org_id=int(thread.org_id), only_org_artifact_ids=None
+    )
+
+    # Hide "empty" artifact threads in navigation by default:
+    # a thread is considered visible if it has messages OR has unread OR is currently active.
+    t_ids = [int(t.id) for t in all_threads]
+    last_msg_rows = (
+        db.query(ChatMessage.thread_id, func.max(ChatMessage.id).label("last_id"))
+        .filter(ChatMessage.thread_id.in_(t_ids or [-1]))
+        .group_by(ChatMessage.thread_id)
+        .all()
+    )
+    has_messages_by_thread_id = {int(tid): (int(last_id or 0) > 0) for (tid, last_id) in last_msg_rows}
+    oa_ids = sorted({int(t.org_artifact_id) for t in all_threads if t.org_artifact_id})
+    oa_labels: dict[int, str] = {}
+    if oa_ids:
+        oa_rows = (
+            db.query(OrgArtifact.id, Artifact.short_name, Artifact.title)
+            .join(Artifact, Artifact.id == OrgArtifact.artifact_id)
+            .filter(OrgArtifact.id.in_(oa_ids))
+            .all()
+        )
+        for oa_id, sn, title in oa_rows:
+            label = (sn or "") or ""
+            if title:
+                label = f"{label} · {title}" if label else title
+            oa_labels[int(oa_id)] = label or f"Артефакт #{int(oa_id)}"
+
+    # Build navigation list: org chat first, then artifacts by short_name
+    nav_items: list[dict] = []
+    base_prefix = "/auditor" if (back_href or "").startswith("/auditor") else "/my"
+    # Org chat link
+    org_thread = next((t for t in all_threads if t.org_artifact_id is None), None)
+    if org_thread:
+        nav_items.append(
+            {
+                "kind": "org",
+                "title": "Общий чат",
+                "href": f"{base_prefix}/chat?org_id={int(thread.org_id)}",
+                "thread_id": int(org_thread.id),
+                "unread": int(unread_by_thread_id.get(int(org_thread.id), 0)),
+                "active": int(thread.id) == int(org_thread.id),
+            }
+        )
+    # Artifact chats
+    art_threads_all = [t for t in all_threads if t.org_artifact_id is not None]
+    art_threads_visible: list[ChatThread] = []
+    for t in art_threads_all:
+        tid = int(t.id)
+        if int(thread.id) == tid:
+            art_threads_visible.append(t)
+            continue
+        if unread_by_thread_id.get(tid, 0) > 0:
+            art_threads_visible.append(t)
+            continue
+        if has_messages_by_thread_id.get(tid, False):
+            art_threads_visible.append(t)
+            continue
+
+    # Sort: unread first, then by label.
+    art_threads_visible.sort(
+        key=lambda t: (
+            0 if int(unread_by_thread_id.get(int(t.id), 0)) > 0 else 1,
+            oa_labels.get(int(t.org_artifact_id or 0), ""),
+            int(t.org_artifact_id or 0),
+        )
+    )
+    for t in art_threads_visible:
+        oa_id = int(t.org_artifact_id or 0)
+        nav_items.append(
+            {
+                "kind": "artifact",
+                "title": oa_labels.get(oa_id, f"Артефакт #{oa_id}"),
+                "href": f"{base_prefix}/org_artifacts/{oa_id}/chat",
+                "thread_id": int(t.id),
+                "unread": int(unread_by_thread_id.get(int(t.id), 0)),
+                "active": int(thread.id) == int(t.id),
+            }
+        )
+
+    msgs = (
+        db.query(ChatMessage)
+        .filter(ChatMessage.thread_id == int(thread.id))
+        .options(joinedload(ChatMessage.author))
+        .order_by(ChatMessage.id.asc())
+        .limit(200)
+        .all()
+    )
+    last_id = int(msgs[-1].id) if msgs else 0
+    if last_id:
+        r = (
+            db.query(ChatThreadRead)
+            .filter(ChatThreadRead.thread_id == int(thread.id), ChatThreadRead.user_id == int(user.id))
+            .one_or_none()
+        )
+        if r:
+            r.last_read_message_id = last_id
+            r.last_read_at = datetime.utcnow()
+        else:
+            db.add(ChatThreadRead(thread_id=int(thread.id), user_id=int(user.id), last_read_message_id=last_id))
+        write_audit_log(
+            db,
+            actor=user,
+            org_id=int(thread.org_id),
+            action="chat_read_update",
+            entity_type="chat_thread",
+            entity_id=str(int(thread.id)),
+            after={"thread_id": int(thread.id), "last_read_message_id": last_id},
+            request=request,
+        )
+        db.commit()
+
+    resp = templates.TemplateResponse(
+        "chat_thread.html",
+        {
+            "request": request,
+            "user": user,
+            "container_class": "container-wide",
+            "title": "Чат",
+            "thread_id": int(thread.id),
+            "org_name": (org.name if org else ""),
+            "artifact_label": artifact_label or "",
+            "back_href": back_href,
+            "back_label": back_label,
+            "current_user_login": user.login,
+            "last_message_id": last_id,
+            "threads_nav": nav_items,
+            "threads_unread_total": int(total_unread),
+        },
+    )
+    resp.headers["Cache-Control"] = "no-store, max-age=0"
+    resp.headers["Pragma"] = "no-cache"
+    return resp
+
+
+@router.get("/api/chat/threads/{thread_id}/messages")
+def api_chat_messages(
+    thread_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+    after_id: int = 0,
+) -> dict:
+    t = db.get(ChatThread, int(thread_id))
+    if not t:
+        raise HTTPException(status_code=404, detail="Тред не найден")
+    _require_chat_access(db, user, int(t.org_id), allow_customer=True)
+    q = db.query(ChatMessage).options(joinedload(ChatMessage.author)).filter(ChatMessage.thread_id == int(t.id))
+    if int(after_id or 0) > 0:
+        q = q.filter(ChatMessage.id > int(after_id))
+    msgs = q.order_by(ChatMessage.id.asc()).limit(200).all()
+    return {"messages": [_chat_message_to_dict(m) for m in msgs]}
+
+
+@router.post("/api/chat/threads/{thread_id}/messages")
+async def api_chat_send_message(
+    thread_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> dict:
+    t = db.get(ChatThread, int(thread_id))
+    if not t:
+        raise HTTPException(status_code=404, detail="Тред не найден")
+    _require_chat_access(db, user, int(t.org_id), allow_customer=True)
+    payload = await request.json()
+    body = str((payload or {}).get("body") or "").strip()
+    if not body:
+        raise HTTPException(status_code=400, detail="Пустое сообщение")
+    if len(body) > 5000:
+        raise HTTPException(status_code=400, detail="Слишком длинное сообщение")
+    m = ChatMessage(thread_id=int(t.id), author_user_id=int(user.id), body=body)
+    db.add(m)
+    db.flush()
+    write_audit_log(
+        db,
+        actor=user,
+        org_id=int(t.org_id),
+        action="chat_message_create",
+        entity_type="chat_message",
+        entity_id=str(int(m.id)),
+        after={"thread_id": int(t.id), "author_user_id": int(user.id)},
+        request=request,
+    )
+    db.commit()
+    m2 = db.query(ChatMessage).options(joinedload(ChatMessage.author)).filter(ChatMessage.id == int(m.id)).one()
+    return {"message": _chat_message_to_dict(m2)}
+
+
+@router.post("/api/chat/threads/{thread_id}/read")
+async def api_chat_mark_read(
+    thread_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> dict:
+    t = db.get(ChatThread, int(thread_id))
+    if not t:
+        raise HTTPException(status_code=404, detail="Тред не найден")
+    _require_chat_access(db, user, int(t.org_id), allow_customer=True)
+    payload = await request.json()
+    last_id = int((payload or {}).get("last_read_message_id") or 0)
+    if last_id <= 0:
+        return {"ok": True}
+    r = (
+        db.query(ChatThreadRead)
+        .filter(ChatThreadRead.thread_id == int(t.id), ChatThreadRead.user_id == int(user.id))
+        .one_or_none()
+    )
+    if r:
+        if (r.last_read_message_id or 0) < last_id:
+            r.last_read_message_id = last_id
+        r.last_read_at = datetime.utcnow()
+    else:
+        db.add(ChatThreadRead(thread_id=int(t.id), user_id=int(user.id), last_read_message_id=last_id))
+    write_audit_log(
+        db,
+        actor=user,
+        org_id=int(t.org_id),
+        action="chat_read_update",
+        entity_type="chat_thread",
+        entity_id=str(int(t.id)),
+        after={"thread_id": int(t.id), "last_read_message_id": last_id},
+        request=request,
+    )
+    db.commit()
+    return {"ok": True}
 
 @router.post("/auditor/index-kb/uib/manual")
 def auditor_index_kb_uib_save_manual(
@@ -2910,6 +3420,12 @@ def auditor_org_artifact_view_page(
     if "://" in back_url:
         back_url = f"/auditor/artifacts?org_id={oa.org_id}"
 
+    # Unread badge for "chat by artifact" button on this page
+    _total_unread, _unread_by_thread_id, unread_by_oa_id = _get_chat_unread_for_org(
+        db, user=user, org_id=int(oa.org_id), only_org_artifact_ids=[int(oa.id)]
+    )
+    chat_unread_for_oa = int(unread_by_oa_id.get(int(oa.id), 0) if unread_by_oa_id else 0)
+
     resp = templates.TemplateResponse(
         "auditor_org_artifact_view.html",
         {
@@ -2927,6 +3443,7 @@ def auditor_org_artifact_view_page(
             "preview_error": preview_error,
             "back_url": back_url,
             "current_url": request.url.path + (f"?{request.url.query}" if request.url.query else ""),
+            "chat_unread_for_oa": chat_unread_for_oa,
         },
     )
     resp.headers["Cache-Control"] = "no-store, max-age=0"

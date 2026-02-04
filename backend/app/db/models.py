@@ -379,3 +379,59 @@ class IndexKbTemplateRow(Base):
     title: Mapped[str] = mapped_column(Text, nullable=False, default="")
     short_name: Mapped[str] = mapped_column(String(255), nullable=False, default="")
     group_code: Mapped[str] = mapped_column(String(255), nullable=False, default="")
+
+
+# --- Chat (auditor <-> customer), MVP polling ---
+
+
+class ChatThread(Base):
+    __tablename__ = "chat_threads"
+    __table_args__ = (
+        UniqueConstraint("org_id", "org_artifact_id", name="uq_chat_threads_org_artifact"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    org_id: Mapped[int] = mapped_column(ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True)
+    org_artifact_id: Mapped[int | None] = mapped_column(ForeignKey("org_artifacts.id", ondelete="CASCADE"), nullable=True, index=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)
+    created_by_user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+
+    org: Mapped[Organization] = relationship()
+    created_by: Mapped["User | None"] = relationship(foreign_keys=[created_by_user_id])
+    org_artifact: Mapped["OrgArtifact | None"] = relationship()
+
+    messages: Mapped[list["ChatMessage"]] = relationship(
+        back_populates="thread",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+
+
+class ChatMessage(Base):
+    __tablename__ = "chat_messages"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    thread_id: Mapped[int] = mapped_column(ForeignKey("chat_threads.id", ondelete="CASCADE"), nullable=False, index=True)
+    author_user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
+
+    body: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow, nullable=False, index=True)
+
+    thread: Mapped[ChatThread] = relationship(back_populates="messages")
+    author: Mapped["User | None"] = relationship()
+
+
+class ChatThreadRead(Base):
+    __tablename__ = "chat_thread_reads"
+    __table_args__ = (UniqueConstraint("thread_id", "user_id", name="uq_chat_thread_reads_thread_user"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    thread_id: Mapped[int] = mapped_column(ForeignKey("chat_threads.id", ondelete="CASCADE"), nullable=False, index=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    last_read_message_id: Mapped[int | None] = mapped_column(ForeignKey("chat_messages.id", ondelete="SET NULL"), nullable=True)
+    last_read_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)
+
+    thread: Mapped[ChatThread] = relationship()
+    user: Mapped["User"] = relationship()
+    last_read_message: Mapped["ChatMessage | None"] = relationship(foreign_keys=[last_read_message_id])
