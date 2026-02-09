@@ -28,6 +28,35 @@
           {% endfor %}
         </select>
       </div>
+      <div style="grid-column: span 2">
+        <div class="muted" style="margin-top:2px; margin-bottom:8px">Целевые показатели Индекса КБ (0..5). Используются на дашбордах как “целевая линия”.</div>
+      </div>
+      <div>
+        <label>Цель · Управление ИБ</label>
+        <input name="target_uib" inputmode="decimal" placeholder="например: 2.0" value="{{ target_uib if target_uib is not none else '' }}" />
+      </div>
+      <div>
+        <label>Цель · СЗИ</label>
+        <input name="target_szi" inputmode="decimal" placeholder="например: 2.0" value="{{ target_szi if target_szi is not none else '' }}" />
+      </div>
+      <div style="grid-column: span 2">
+        <div class="muted" style="margin-top:2px; margin-bottom:8px">
+          Период аудита используется на дашбордах (например, «Файлы · По дням») как полупрозрачная область.
+        </div>
+      </div>
+      <div>
+        <label>Период аудита · Дата начала</label>
+        <input type="date" name="audit_period_start" value="{{ audit_period_start or '' }}" />
+      </div>
+      <div>
+        <label>Период аудита · Длительность</label>
+        <select name="audit_period_weeks">
+          <option value="">(не задано)</option>
+          <option value="1" {% if audit_period_weeks == 1 %}selected{% endif %}>1 неделя</option>
+          <option value="2" {% if audit_period_weeks == 2 %}selected{% endif %}>2 недели</option>
+          <option value="4" {% if audit_period_weeks == 4 %}selected{% endif %}>4 недели</option>
+        </select>
+      </div>
       <div class="filter-actions" style="grid-column: span 2">
         <button class="btn" type="submit">Сохранить</button>
       </div>

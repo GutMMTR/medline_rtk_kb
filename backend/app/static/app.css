@@ -30,7 +30,10 @@ label { display:block; margin-top: 10px; margin-bottom: 4px; font-size: 13px; co
 input, select { width: 100%; padding: 10px 12px; border:1px solid var(--border-2); border-radius: 12px; background:#fff; }
 input:focus, select:focus, textarea:focus { outline: none; border-color: rgba(107,45,255,.55); box-shadow: 0 0 0 3px rgba(107,45,255,.18); }
 textarea { width: 100%; padding: 10px 12px; border:1px solid var(--border-2); border-radius: 12px; font-family: inherit; background:#fff; }
-button, .btn { display:inline-flex; align-items:center; justify-content:center; gap: 8px; padding: 9px 14px; border-radius: 12px; border:1px solid var(--rtk-purple); background: var(--rtk-purple); color:#fff; cursor:pointer; text-decoration:none; font-weight: 600; font-size: 14px; line-height: 1; }
+button, .btn { display:inline-flex; align-items:center; justify-content:center; gap: 8px; padding: 9px 14px; border-radius: 12px; border:1px solid var(--rtk-purple); background: var(--rtk-purple); color:#fff; cursor:pointer; text-decoration:none; font-weight: 600; font-size: 14px; line-height: 1; white-space: nowrap; }
+/* prevent flex shrinking that forces internal wrapping */
+.filter-actions .btn,
+.dash-actions-row .btn { flex: 0 0 auto; }
 button:hover, .btn:hover { filter: brightness(.95); }
 button:disabled, .btn[aria-disabled="true"] { opacity: .65; cursor: not-allowed; filter: none; }
 /* allow disabling <a class="btn"> via aria-disabled */
@@ -113,6 +116,91 @@ input[type="checkbox"]{ width: auto; padding: 0; }
   border-radius: 12px;
   padding: 10px 12px;
   background: #fff;
+}
+
+/* Dashboards: consolidated overview (single org) */
+.dash-overview-grid{
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+/* Dashboards: full filter right column actions */
+.dash-actions-row{
+  margin-top: 10px;
+  display: flex;
+  align-items: flex-end;
+  justify-content: flex-end;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.dash-details{
+  min-width: 320px;
+  max-width: 520px;
+  flex: 1 1 320px;
+}
+.dash-actions-row select{ width: 100%; }
+/* Make select + buttons perfectly align (same control height) */
+.dash-actions-row .btn{
+  height: 40px;
+  padding: 0 14px;
+  line-height: 38px;
+}
+.dash-actions-row select{
+  height: 40px;
+  padding: 0 12px;
+}
+/* Align percent checkbox with 40px controls */
+.dash-actions-row .filter-meta__label{
+  height: 40px;
+  align-items: center;
+  margin: 0;
+}
+.dash-actions-row .filter-meta__label input[type="checkbox"]{
+  margin: 0;
+}
+@media (min-width: 980px){
+  .dash-actions-row{ flex-wrap: nowrap; }
+}
+@media (max-width: 720px){
+  .dash-overview-grid{ grid-template-columns: 1fr; }
+}
+.dash-overview-card{
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 10px;
+  background: #fff;
+  box-shadow: 0 4px 14px rgba(16,24,40,.06);
+  cursor: pointer;
+  user-select: none;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.dash-overview-card:hover{
+  border-color: rgba(107,45,255,.35);
+  box-shadow: 0 10px 22px rgba(16,24,40,.10);
+}
+.dash-overview-card__head{
+  display:flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+.dash-overview-card__title{ font-weight: 850; }
+.dash-overview-card__hint{ font-size: 12px; }
+.dash-overview-card__chart{
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  height: 180px; /* true thumbnail height */
+}
+.dash-overview-card__chart canvas{
+  position: absolute;
+  inset: 0;
+  width: 100% !important;
+  height: 100% !important;
 }
 .dash-advanced > summary{
   cursor: pointer;

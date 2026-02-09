@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import enum
-from datetime import datetime
+from datetime import date, datetime
 
 from sqlalchemy import Boolean, Date, DateTime, Enum, Float, ForeignKey, Integer, LargeBinary, String, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB
@@ -68,6 +68,10 @@ class Organization(Base):
     created_via: Mapped[str] = mapped_column(String(32), nullable=False, default="manual")  # manual|nextcloud|system
 
     artifact_level_id: Mapped[int | None] = mapped_column(ForeignKey("artifact_levels.id", ondelete="SET NULL"), nullable=True)
+
+    # Период аудита (для дашбордов): дата старта + длительность в неделях.
+    audit_period_start: Mapped[date | None] = mapped_column(Date, nullable=True)
+    audit_period_weeks: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     created_by: Mapped["User | None"] = relationship(foreign_keys=[created_by_user_id])
     artifact_level: Mapped["ArtifactLevel | None"] = relationship(foreign_keys=[artifact_level_id])
@@ -354,6 +358,25 @@ class IndexKbManualValue(Base):
 
     org: Mapped[Organization] = relationship()
     updated_by: Mapped["User | None"] = relationship(foreign_keys=[updated_by_user_id])
+
+
+class OrgIndexKbTarget(Base):
+    """
+    Целевые значения Индекса КБ по организации и листу.
+
+    Пример sheet_name: "Управление ИБ", "СЗИ".
+    """
+
+    __tablename__ = "org_index_kb_targets"
+    __table_args__ = (UniqueConstraint("org_id", "sheet_name", name="uq_org_index_kb_targets_org_sheet"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    org_id: Mapped[int] = mapped_column(ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True)
+    sheet_name: Mapped[str] = mapped_column(String(255), nullable=False, default="", index=True)
+    target_value: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)
+
+    org: Mapped[Organization] = relationship()
 
 
 class IndexKbTemplateRow(Base):

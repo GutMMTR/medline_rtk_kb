@@ -38,6 +38,7 @@ from app.db.models import (
     FilePreview,
     FileVersion,
     IndexKbTemplateRow,
+    OrgIndexKbTarget,
     NextcloudIntegrationSettings,
     NextcloudRemoteFileState,
     OrgArtifact,
@@ -4755,8 +4756,8 @@ def _dashboards_page_impl(
             sel.append(v)
 
     # Cap to avoid huge server-side work
-    if len(sel) > 10:
-        sel = sel[:10]
+    if len(sel) > 50:
+        sel = sel[:50]
 
     df, dt, p_start, p_end, range_err = _parse_date_range_bounds_utc(date_from, date_to)
 
@@ -4767,11 +4768,16 @@ def _dashboards_page_impl(
     # selected chart (single)
     chart_key = (request.query_params.get("chart") or "").strip()
     allowed_chart_keys = {
+        "overview_uib",
+        "overview_szi",
+        "uib_total",
+        "szi_total",
         "uib_overall",
         "szi_overall",
         "uib_radar",
         "szi_radar",
         "uploads",
+        "uploads_repeat",
         "statuses",
         "statuses_uib",
         "statuses_szi",
@@ -4786,8 +4792,12 @@ def _dashboards_page_impl(
         "backlog_age",
         "backlog_age_uib",
         "backlog_age_szi",
+        "backlog_sla_uib",
+        "backlog_sla_szi",
     }
     if chart_key not in allowed_chart_keys:
+        # UX: по умолчанию показываем обычный “Индекс по организациям”.
+        # “Обзор” должен включаться только явным выбором кнопки.
         chart_key = "uib_overall"
     needs_details = chart_key in {
         "uib_radar",
@@ -4803,6 +4813,8 @@ def _dashboards_page_impl(
         "backlog_age",
         "backlog_age_uib",
         "backlog_age_szi",
+        "backlog_sla_uib",
+        "backlog_sla_szi",
     }
 
     # details org: parse safely from string (FastAPI иначе падает на details_org_id="")
@@ -4823,6 +4835,47 @@ def _dashboards_page_impl(
         det_id = None
     details_org_name = org_by_id.get(int(det_id)).name if (det_id and int(det_id) in org_by_id) else ""
 
+    # Audit period overlay selector (used on Files -> by days chart).
+    audit_org_id: int | None = None
+    s_audit = (request.query_params.get("audit_org_id") or "").strip()
+    if s_audit:
+        try:
+            audit_org_id = int(s_audit)
+        except Exception:
+            audit_org_id = None
+    if audit_org_id is not None and audit_org_id not in selected_org_ids:
+        audit_org_id = None
+
+    audit_periods_by_org: dict[int, dict[str, object]] = {}
+    for oid in selected_org_ids:
+        o = org_by_id.get(int(oid))
+        if not o:
+            continue
+        start = getattr(o, "audit_period_start", None)
+        weeks = getattr(o, "audit_period_weeks", None)
+        if start and weeks:
+            try:
+                w = int(weeks)
+            except Exception:
+                continue
+            if w <= 0:
+                continue
+            end = start + timedelta(days=w * 7)
+            audit_periods_by_org[int(oid)] = {
+                "org_id": int(oid),
+                "org_name": o.name,
+                "start": start.isoformat(),
+                "end": end.isoformat(),
+                "weeks": int(w),
+            }
+
+    if audit_org_id is None:
+        # Prefer first org that has an audit period configured.
+        if audit_periods_by_org:
+            audit_org_id = sorted(audit_periods_by_org.keys())[0]
+        elif selected_org_ids:
+            audit_org_id = int(selected_org_ids[0])
+
     # Filters for breakdowns
     dim_topic = (request.query_params.get("dim_topic") or "").strip() in ("1", "true", "on", "yes")
     dim_domain = (request.query_params.get("dim_domain") or "").strip() in ("1", "true", "on", "yes")
@@ -4840,6 +4893,16 @@ def _dashboards_page_impl(
         top_n = 5
     if top_n > 30:
         top_n = 30
+
+    # Files: repeated uploads threshold (versions count)
+    try:
+        repeat_min = int((request.query_params.get("repeat_min") or "4").strip() or "4")
+    except Exception:
+        repeat_min = 4
+    if repeat_min < 2:
+        repeat_min = 2
+    if repeat_min > 50:
+        repeat_min = 50
 
     def _mean(vals: list[float]) -> float | None:
         xs = [float(v) for v in vals if v is not None]  # type: ignore[comparison-overlap]
@@ -4873,9 +4936,10 @@ def _dashboards_page_impl(
     chart_subtitle = ""
     dash: dict = {"type": chart_key, "data": {}}
 
+    # Charts require choosing at least one organization.
     if selected_org_ids and not error:
         def _sheet_name_from_chart_key(k: str) -> str:
-            if k.endswith("_szi"):
+            if k.startswith("szi_") or k.endswith("_szi"):
                 return SZI_SHEET_NAME
             # default: UIB
             return UIB_SHEET_NAME
@@ -5051,22 +5115,340 @@ def _dashboards_page_impl(
                 "label_titles": {code: title for (code, title) in group_order},
             }
 
-        if chart_key == "uib_overall":
+        if chart_key in ("overview_uib", "overview_szi"):
+            if len(selected_org_ids) != 1:
+                chart_key = "szi_overall" if chart_key == "overview_szi" else "uib_overall"
+            else:
+                oid = int(selected_org_ids[0])
+                org_name = org_by_id[int(oid)].name
+                sheet_name = SZI_SHEET_NAME if chart_key == "overview_szi" else UIB_SHEET_NAME
+
+                chart_title = f"Обзор · {sheet_name} ({org_name})"
+                chart_subtitle = "Все ключевые графики на одной странице. Кликните по карточке, чтобы открыть полную версию."
+
+                # ---- Index overall (bar) ----
+                if sheet_name == UIB_SHEET_NAME:
+                    _org_uib, _tpl_uib, uib_rows = build_uib_view(db, org_id=int(oid), actor=user, range_start=p_start, range_end=p_end)
+                    overall = _overall_from_rows(uib_rows)
+                else:
+                    _org_szi, _tpl_szi, szi_rows = build_szi_view(db, org_id=int(oid), actor=user, range_start=p_start, range_end=p_end)
+                    overall = _overall_from_rows(szi_rows)
+
+                tgt = (
+                    db.query(OrgIndexKbTarget.target_value)
+                    .filter(OrgIndexKbTarget.org_id == int(oid), OrgIndexKbTarget.sheet_name == sheet_name)
+                    .scalar()
+                )
+                index_rows = [
+                    {
+                        "org_id": int(oid),
+                        "org_name": org_name,
+                        "target": float(tgt) if tgt is not None else None,
+                        **overall,
+                    }
+                ]
+
+                # ---- Statuses ----
+                sheet_ids = _artifact_ids_for_sheet(sheet_name)
+                st_row = (
+                    db.query(
+                        func.sum(case((OrgArtifact.current_file_version_id.is_(None), 1), else_=0)).label("missing"),
+                        func.sum(case((OrgArtifact.review_status == OrgArtifactReviewStatus.needs_correction, 1), else_=0)).label("needs_correction"),
+                        func.sum(
+                            case(
+                                (
+                                    and_(
+                                        OrgArtifact.review_status == OrgArtifactReviewStatus.approved,
+                                        OrgArtifact.audited_file_version_id.isnot(None),
+                                        OrgArtifact.current_file_version_id.isnot(None),
+                                        OrgArtifact.audited_file_version_id == OrgArtifact.current_file_version_id,
+                                    ),
+                                    1,
+                                ),
+                                else_=0,
+                            )
+                        ).label("approved"),
+                        func.sum(
+                            case(
+                                (
+                                    and_(
+                                        OrgArtifact.current_file_version_id.isnot(None),
+                                        OrgArtifact.audited_file_version_id.is_(None),
+                                        OrgArtifact.review_status == OrgArtifactReviewStatus.pending,
+                                    ),
+                                    1,
+                                ),
+                                else_=0,
+                            )
+                        ).label("needs_audit"),
+                        func.sum(
+                            case(
+                                (
+                                    and_(
+                                        OrgArtifact.current_file_version_id.isnot(None),
+                                        OrgArtifact.audited_file_version_id.isnot(None),
+                                        OrgArtifact.current_file_version_id != OrgArtifact.audited_file_version_id,
+                                    ),
+                                    1,
+                                ),
+                                else_=0,
+                            )
+                        ).label("changed"),
+                    )
+                    .join(Artifact, Artifact.id == OrgArtifact.artifact_id)
+                    .filter(OrgArtifact.org_id == int(oid))
+                    .filter(Artifact.id.in_(select(sheet_ids.c.id)))
+                    .one()
+                )
+                statuses_payload = {
+                    "labels": [org_name],
+                    "datasets": [
+                        {"label": "Проаудировано", "data": [int(getattr(st_row, "approved", 0) or 0)]},
+                        {"label": "Требует аудита", "data": [int(getattr(st_row, "needs_audit", 0) or 0)]},
+                        {"label": "Требует корректировки", "data": [int(getattr(st_row, "needs_correction", 0) or 0)]},
+                        {"label": "Изменён (есть новая версия)", "data": [int(getattr(st_row, "changed", 0) or 0)]},
+                        {"label": "Нет файла", "data": [int(getattr(st_row, "missing", 0) or 0)]},
+                    ],
+                    "indexAxis": "y",
+                }
+
+                # ---- Backlog (actionable only) ----
+                now_dt = datetime.utcnow()
+                fv = aliased(FileVersion)
+                q = (
+                    db.query(
+                        case(
+                            (OrgArtifact.current_file_version_id.is_(None), "нет файла"),
+                            (
+                                and_(
+                                    OrgArtifact.current_file_version_id.isnot(None),
+                                    func.date_part("day", func.cast(now_dt, sa.DateTime()) - fv.created_at) <= 7,
+                                ),
+                                "0-7",
+                            ),
+                            (
+                                and_(
+                                    OrgArtifact.current_file_version_id.isnot(None),
+                                    func.date_part("day", func.cast(now_dt, sa.DateTime()) - fv.created_at) <= 14,
+                                ),
+                                "8-14",
+                            ),
+                            (
+                                and_(
+                                    OrgArtifact.current_file_version_id.isnot(None),
+                                    func.date_part("day", func.cast(now_dt, sa.DateTime()) - fv.created_at) <= 30,
+                                ),
+                                "15-30",
+                            ),
+                            (
+                                and_(
+                                    OrgArtifact.current_file_version_id.isnot(None),
+                                    func.date_part("day", func.cast(now_dt, sa.DateTime()) - fv.created_at) <= 60,
+                                ),
+                                "31-60",
+                            ),
+                            else_="61+",
+                        ).label("bucket"),
+                        case(
+                            (OrgArtifact.review_status == OrgArtifactReviewStatus.needs_correction, "требует корректировки"),
+                            (
+                                and_(
+                                    OrgArtifact.current_file_version_id.isnot(None),
+                                    OrgArtifact.audited_file_version_id.is_(None),
+                                    OrgArtifact.review_status == OrgArtifactReviewStatus.pending,
+                                ),
+                                "требует аудита",
+                            ),
+                            (
+                                and_(
+                                    OrgArtifact.current_file_version_id.isnot(None),
+                                    OrgArtifact.audited_file_version_id.isnot(None),
+                                    OrgArtifact.current_file_version_id != OrgArtifact.audited_file_version_id,
+                                ),
+                                "изменён",
+                            ),
+                            (OrgArtifact.current_file_version_id.is_(None), "нет файла"),
+                            else_="прочее",
+                        ).label("st"),
+                        func.count(OrgArtifact.id).label("cnt"),
+                    )
+                    .outerjoin(fv, fv.id == OrgArtifact.current_file_version_id)
+                    .join(Artifact, Artifact.id == OrgArtifact.artifact_id)
+                    .filter(OrgArtifact.org_id == int(oid))
+                    .filter(Artifact.id.in_(select(sheet_ids.c.id)))
+                )
+                if filter_topics:
+                    q = q.filter(Artifact.topic.in_(filter_topics))
+                if filter_domains:
+                    q = q.filter(Artifact.domain.in_(filter_domains))
+                q = q.filter(
+                    or_(
+                        OrgArtifact.current_file_version_id.is_(None),
+                        OrgArtifact.review_status == OrgArtifactReviewStatus.needs_correction,
+                        and_(OrgArtifact.current_file_version_id.isnot(None), OrgArtifact.audited_file_version_id.is_(None), OrgArtifact.review_status == OrgArtifactReviewStatus.pending),
+                        and_(OrgArtifact.current_file_version_id.isnot(None), OrgArtifact.audited_file_version_id.isnot(None), OrgArtifact.current_file_version_id != OrgArtifact.audited_file_version_id),
+                    )
+                )
+                rows = q.group_by("bucket", "st").all()
+                buckets = ["нет файла", "0-7", "8-14", "15-30", "31-60", "61+"]
+                m: dict[tuple[str, str], int] = {}
+                for b, st, cnt in rows:
+                    m[(str(b), str(st))] = int(cnt or 0)
+                backlog_payload = {
+                    "labels": buckets,
+                    "datasets": [
+                        {"label": "Требует аудита", "data": [m.get((b, "требует аудита"), 0) for b in buckets]},
+                        {"label": "Требует корректировки", "data": [m.get((b, "требует корректировки"), 0) for b in buckets]},
+                        {"label": "Изменён", "data": [m.get((b, "изменён"), 0) for b in buckets]},
+                        {"label": "Нет файла", "data": [m.get((b, "нет файла"), 0) for b in buckets]},
+                    ],
+                    "indexAxis": "y",
+                }
+
+                # ---- Uploads (single org) ----
+                r_start = p_start or (datetime.utcnow() - timedelta(days=90))
+                r_end = p_end or (datetime.utcnow() + timedelta(days=1))
+                up_rows = (
+                    db.query(func.date(FileVersion.created_at).label("d"), func.count(FileVersion.id))
+                    .join(OrgArtifact, OrgArtifact.id == FileVersion.org_artifact_id)
+                    .filter(OrgArtifact.org_id == int(oid))
+                    .filter(FileVersion.created_at >= r_start, FileVersion.created_at < r_end)
+                    .group_by(func.date(FileVersion.created_at))
+                    .all()
+                )
+                start_day = r_start.date()
+                end_day = (r_end - timedelta(days=1)).date()
+                labels: list[str] = []
+                cur = start_day
+                while cur <= end_day:
+                    labels.append(cur.isoformat())
+                    cur = cur + timedelta(days=1)
+                by_day = {str(d): int(c or 0) for d, c in up_rows if d is not None}
+                uploads_payload = {
+                    "labels": labels,
+                    "series": [{"org_id": int(oid), "org_name": org_name, "data": [by_day.get(lbl, 0) for lbl in labels]}],
+                }
+
+                dash["data"] = {
+                    "org_id": int(oid),
+                    "org_name": org_name,
+                    "sheet_name": sheet_name,
+                    "index": {"rows": index_rows},
+                    "statuses": statuses_payload,
+                    "backlog": backlog_payload,
+                    "uploads": uploads_payload,
+                }
+
+        elif chart_key == "uib_total":
+            chart_title = "Управление ИБ · Суммарный индекс"
+            chart_subtitle = "Агрегация по организациям: среднее значение КБ1/КБ2/КБ3. Если организации не выбраны — берём все."
+            org_ids_for_calc = list(selected_org_ids)
+            if not org_ids_for_calc:
+                org_ids_for_calc = [int(o.id) for o in orgs if getattr(o, "id", None)]
+
+            tgt_rows = (
+                db.query(OrgIndexKbTarget.org_id, OrgIndexKbTarget.target_value)
+                .filter(OrgIndexKbTarget.org_id.in_(org_ids_for_calc), OrgIndexKbTarget.sheet_name == UIB_SHEET_NAME)
+                .all()
+            )
+            targets = [float(v) for (_oid, v) in tgt_rows if v is not None]
+            target_avg = _mean(targets) if targets else None
+
+            kb1_vals: list[float] = []
+            kb2_vals: list[float] = []
+            kb3_vals: list[float] = []
+            for oid in org_ids_for_calc:
+                _org_uib, _tpl_uib, uib_rows = build_uib_view(db, org_id=int(oid), actor=user, range_start=p_start, range_end=p_end)
+                overall = _overall_from_rows(uib_rows)
+                kb1_vals.append(float(overall.get("kb1") or 0.0))
+                kb2_vals.append(float(overall.get("kb2") or 0.0))
+                kb3_vals.append(float(overall.get("kb3") or 0.0))
+
+            dash["data"] = {
+                "org_count": int(len(org_ids_for_calc)),
+                "kb1": _mean(kb1_vals),
+                "kb2": _mean(kb2_vals),
+                "kb3": _mean(kb3_vals),
+                "dist": {"kb1": kb1_vals, "kb2": kb2_vals, "kb3": kb3_vals},
+                "target": target_avg,
+            }
+
+        elif chart_key == "szi_total":
+            chart_title = "СЗИ · Суммарный индекс"
+            chart_subtitle = "Агрегация по организациям: среднее значение КБ1/КБ2/КБ3. Если организации не выбраны — берём все."
+            org_ids_for_calc = list(selected_org_ids)
+            if not org_ids_for_calc:
+                org_ids_for_calc = [int(o.id) for o in orgs if getattr(o, "id", None)]
+
+            tgt_rows = (
+                db.query(OrgIndexKbTarget.org_id, OrgIndexKbTarget.target_value)
+                .filter(OrgIndexKbTarget.org_id.in_(org_ids_for_calc), OrgIndexKbTarget.sheet_name == SZI_SHEET_NAME)
+                .all()
+            )
+            targets = [float(v) for (_oid, v) in tgt_rows if v is not None]
+            target_avg = _mean(targets) if targets else None
+
+            kb1_vals: list[float] = []
+            kb2_vals: list[float] = []
+            kb3_vals: list[float] = []
+            for oid in org_ids_for_calc:
+                _org_szi, _tpl_szi, szi_rows = build_szi_view(db, org_id=int(oid), actor=user, range_start=p_start, range_end=p_end)
+                overall = _overall_from_rows(szi_rows)
+                kb1_vals.append(float(overall.get("kb1") or 0.0))
+                kb2_vals.append(float(overall.get("kb2") or 0.0))
+                kb3_vals.append(float(overall.get("kb3") or 0.0))
+
+            dash["data"] = {
+                "org_count": int(len(org_ids_for_calc)),
+                "kb1": _mean(kb1_vals),
+                "kb2": _mean(kb2_vals),
+                "kb3": _mean(kb3_vals),
+                "dist": {"kb1": kb1_vals, "kb2": kb2_vals, "kb3": kb3_vals},
+                "target": target_avg,
+            }
+
+        elif chart_key == "uib_overall":
             chart_title = "Управление ИБ · Индекс по организациям"
             chart_subtitle = "Средние значения по требованиям (КБ1/КБ2/КБ3 = уровни L1/L2/L3)."
+            tgt_rows = (
+                db.query(OrgIndexKbTarget.org_id, OrgIndexKbTarget.target_value)
+                .filter(OrgIndexKbTarget.org_id.in_(selected_org_ids), OrgIndexKbTarget.sheet_name == UIB_SHEET_NAME)
+                .all()
+            )
+            targets = {int(oid): float(v) for (oid, v) in tgt_rows if oid is not None and v is not None}
             rows_out = []
             for oid in selected_org_ids:
                 _org_uib, _tpl_uib, uib_rows = build_uib_view(db, org_id=int(oid), actor=user, range_start=p_start, range_end=p_end)
-                rows_out.append({"org_id": int(oid), "org_name": org_by_id[int(oid)].name, **_overall_from_rows(uib_rows)})
+                rows_out.append(
+                    {
+                        "org_id": int(oid),
+                        "org_name": org_by_id[int(oid)].name,
+                        "target": targets.get(int(oid)),
+                        **_overall_from_rows(uib_rows),
+                    }
+                )
             dash["data"] = {"rows": rows_out}
 
         elif chart_key == "szi_overall":
             chart_title = "СЗИ · Индекс по организациям"
             chart_subtitle = "Средние значения по требованиям (КБ1/КБ2/КБ3 = уровни L1/L2/L3)."
+            tgt_rows = (
+                db.query(OrgIndexKbTarget.org_id, OrgIndexKbTarget.target_value)
+                .filter(OrgIndexKbTarget.org_id.in_(selected_org_ids), OrgIndexKbTarget.sheet_name == SZI_SHEET_NAME)
+                .all()
+            )
+            targets = {int(oid): float(v) for (oid, v) in tgt_rows if oid is not None and v is not None}
             rows_out = []
             for oid in selected_org_ids:
                 _org_szi, _tpl_szi, szi_rows = build_szi_view(db, org_id=int(oid), actor=user, range_start=p_start, range_end=p_end)
-                rows_out.append({"org_id": int(oid), "org_name": org_by_id[int(oid)].name, **_overall_from_rows(szi_rows)})
+                rows_out.append(
+                    {
+                        "org_id": int(oid),
+                        "org_name": org_by_id[int(oid)].name,
+                        "target": targets.get(int(oid)),
+                        **_overall_from_rows(szi_rows),
+                    }
+                )
             dash["data"] = {"rows": rows_out}
 
         elif chart_key == "uib_categories" and det_id:
@@ -5129,7 +5511,58 @@ def _dashboards_page_impl(
             series = []
             for oid in selected_org_ids:
                 series.append({"org_id": int(oid), "org_name": org_by_id[int(oid)].name, "data": [by_org_day[int(oid)].get(lbl, 0) for lbl in labels]})
-            dash["data"] = {"labels": labels, "series": series}
+            ap = audit_periods_by_org.get(int(audit_org_id)) if audit_org_id else None
+            dash["data"] = {"labels": labels, "series": series, "audit_period": ap}
+
+        elif chart_key == "uploads_repeat":
+            chart_title = "Файлы · Количество загрузок"
+            if p_start or p_end:
+                chart_subtitle = f"Артефакты, у которых за выбранный период было ≥ {repeat_min} загрузок (версий). Клик по столбцу — история версий."
+            else:
+                chart_subtitle = f"Артефакты, у которых за весь период было ≥ {repeat_min} загрузок (версий). Клик по столбцу — история версий."
+
+            q = (
+                db.query(
+                    OrgArtifact.id.label("oa_id"),
+                    OrgArtifact.org_id.label("org_id"),
+                    Organization.name.label("org_name"),
+                    Artifact.short_name.label("short_name"),
+                    Artifact.title.label("title"),
+                    func.count(FileVersion.id).label("cnt"),
+                )
+                .join(FileVersion, FileVersion.org_artifact_id == OrgArtifact.id)
+                .join(Artifact, Artifact.id == OrgArtifact.artifact_id)
+                .join(Organization, Organization.id == OrgArtifact.org_id)
+                .filter(OrgArtifact.org_id.in_(selected_org_ids))
+            )
+            if p_start:
+                q = q.filter(FileVersion.created_at >= p_start)
+            if p_end:
+                q = q.filter(FileVersion.created_at < p_end)
+            q = (
+                q.group_by(OrgArtifact.id, OrgArtifact.org_id, Organization.name, Artifact.short_name, Artifact.title)
+                .having(func.count(FileVersion.id) >= int(repeat_min))
+                .order_by(func.count(FileVersion.id).desc(), OrgArtifact.id.asc())
+                .limit(20)
+            )
+            rows = q.all()
+            items = []
+            for r in rows:
+                oa_id = int(getattr(r, "oa_id", 0) or 0)
+                org_name = str(getattr(r, "org_name", "") or "")
+                short_name = str(getattr(r, "short_name", "") or "")
+                title = str(getattr(r, "title", "") or "")
+                cnt = int(getattr(r, "cnt", 0) or 0)
+                items.append(
+                    {
+                        "oa_id": oa_id,
+                        "org_id": int(getattr(r, "org_id", 0) or 0),
+                        "org_name": org_name,
+                        "artifact": short_name or title or f"OA {oa_id}",
+                        "count": cnt,
+                    }
+                )
+            dash["data"] = {"items": items, "threshold": int(repeat_min)}
 
         elif chart_key in ("statuses", "statuses_uib", "statuses_szi"):
             sheet_name = _sheet_name_from_chart_key(chart_key)
@@ -5600,6 +6033,98 @@ def _dashboards_page_impl(
                 ],
             }
 
+        elif chart_key in ("backlog_sla_uib", "backlog_sla_szi") and det_id:
+            sheet_name = _sheet_name_from_chart_key(chart_key)
+            sheet_ids = _artifact_ids_for_sheet(sheet_name)
+            chart_title = f"Бэклог · Сейчас в работе ({details_org_name})"
+            chart_subtitle = (
+                f"Лист «{sheet_name}». Только не финальные статусы (требует аудита/корректировки/изменён). "
+                "Периоды: более 3 дней / более 2 недель / более месяца + «никогда не предоставлялся»."
+            )
+
+            fv = aliased(FileVersion)
+            # Age meaning:
+            # - needs_audit / changed: time since file was uploaded (fv.created_at)
+            # - needs_correction: time since audit requested corrections (oa.audited_at)
+            age_base_dt = case(
+                (OrgArtifact.review_status == OrgArtifactReviewStatus.needs_correction, func.coalesce(OrgArtifact.audited_at, fv.created_at)),
+                else_=fv.created_at,
+            )
+            # Use DB time (now()) to avoid TZ/type issues.
+            age_days = func.date_part("day", func.now() - age_base_dt)
+
+            q = (
+                db.query(
+                    case(
+                        (OrgArtifact.current_file_version_id.is_(None), "никогда не предоставлялся"),
+                        (and_(OrgArtifact.current_file_version_id.isnot(None), age_days > 30), "более месяца"),
+                        (and_(OrgArtifact.current_file_version_id.isnot(None), age_days > 14), "более 2 недель"),
+                        else_="более 3 дней",
+                    ).label("bucket"),
+                    case(
+                        (OrgArtifact.review_status == OrgArtifactReviewStatus.needs_correction, "требует корректировки"),
+                        (
+                            and_(
+                                OrgArtifact.current_file_version_id.isnot(None),
+                                OrgArtifact.audited_file_version_id.is_(None),
+                                OrgArtifact.review_status == OrgArtifactReviewStatus.pending,
+                            ),
+                            "требует аудита",
+                        ),
+                        (
+                            and_(
+                                OrgArtifact.current_file_version_id.isnot(None),
+                                OrgArtifact.audited_file_version_id.isnot(None),
+                                OrgArtifact.current_file_version_id != OrgArtifact.audited_file_version_id,
+                            ),
+                            "изменён",
+                        ),
+                        (OrgArtifact.current_file_version_id.is_(None), "никогда не предоставлялся"),
+                        else_="прочее",
+                    ).label("st"),
+                    func.count(OrgArtifact.id).label("cnt"),
+                )
+                .outerjoin(fv, fv.id == OrgArtifact.current_file_version_id)
+                .join(Artifact, Artifact.id == OrgArtifact.artifact_id)
+                .filter(OrgArtifact.org_id == int(det_id))
+                .filter(Artifact.id.in_(select(sheet_ids.c.id)))
+            )
+            if filter_topics:
+                q = q.filter(Artifact.topic.in_(filter_topics))
+            if filter_domains:
+                q = q.filter(Artifact.domain.in_(filter_domains))
+
+            # Only actionable and only older than 3 days (or never provided).
+            q = q.filter(
+                or_(
+                    OrgArtifact.current_file_version_id.is_(None),
+                    and_(OrgArtifact.current_file_version_id.isnot(None), age_days > 3),
+                )
+            ).filter(
+                or_(
+                    OrgArtifact.current_file_version_id.is_(None),
+                    OrgArtifact.review_status == OrgArtifactReviewStatus.needs_correction,
+                    and_(OrgArtifact.current_file_version_id.isnot(None), OrgArtifact.audited_file_version_id.is_(None), OrgArtifact.review_status == OrgArtifactReviewStatus.pending),
+                    and_(OrgArtifact.current_file_version_id.isnot(None), OrgArtifact.audited_file_version_id.isnot(None), OrgArtifact.current_file_version_id != OrgArtifact.audited_file_version_id),
+                )
+            )
+
+            rows = q.group_by("bucket", "st").all()
+            buckets = ["никогда не предоставлялся", "более 3 дней", "более 2 недель", "более месяца"]
+            m: dict[tuple[str, str], int] = {}
+            for b, st, cnt in rows:
+                m[(str(b), str(st))] = int(cnt or 0)
+            dash["data"] = {
+                "indexAxis": "y",
+                "labels": buckets,
+                "datasets": [
+                    {"label": "Требует аудита", "data": [m.get((b, "требует аудита"), 0) for b in buckets]},
+                    {"label": "Требует корректировки", "data": [m.get((b, "требует корректировки"), 0) for b in buckets]},
+                    {"label": "Изменён", "data": [m.get((b, "изменён"), 0) for b in buckets]},
+                    {"label": "Никогда не предоставлялся", "data": [m.get((b, "никогда не предоставлялся"), 0) for b in buckets]},
+                ],
+            }
+
     resp = templates.TemplateResponse(
         "admin/dashboards.html",
         {
@@ -5627,6 +6152,9 @@ def _dashboards_page_impl(
             "filter_topics": filter_topics,
             "filter_domains": filter_domains,
             "top_n": int(top_n),
+            "repeat_min": int(repeat_min),
+            "audit_org_id": int(audit_org_id) if audit_org_id else None,
+            "audit_periods_by_org": audit_periods_by_org,
             # "only_effective" removed
         },
     )
@@ -6126,9 +6654,29 @@ def admin_orgs_edit_page(
     if not org:
         raise HTTPException(status_code=404, detail="Организация не найдена")
     levels = _get_active_artifact_levels(db)
+    t_uib = (
+        db.query(OrgIndexKbTarget)
+        .filter(OrgIndexKbTarget.org_id == int(org.id), OrgIndexKbTarget.sheet_name == UIB_SHEET_NAME)
+        .one_or_none()
+    )
+    t_szi = (
+        db.query(OrgIndexKbTarget)
+        .filter(OrgIndexKbTarget.org_id == int(org.id), OrgIndexKbTarget.sheet_name == SZI_SHEET_NAME)
+        .one_or_none()
+    )
     return templates.TemplateResponse(
         "admin/org_edit.html",
-        {"request": request, "user": user, "org": org, "error": None, "levels": levels},
+        {
+            "request": request,
+            "user": user,
+            "org": org,
+            "error": None,
+            "levels": levels,
+            "target_uib": (float(t_uib.target_value) if t_uib else None),
+            "target_szi": (float(t_szi.target_value) if t_szi else None),
+            "audit_period_start": (org.audit_period_start.isoformat() if getattr(org, "audit_period_start", None) else ""),
+            "audit_period_weeks": (int(org.audit_period_weeks) if getattr(org, "audit_period_weeks", None) else None),
+        },
     )
 
 
@@ -6138,6 +6686,10 @@ def admin_orgs_edit_save(
     request: Request,
     name: str = Form(...),
     artifact_level_id: str = Form(""),
+    target_uib: str = Form(""),
+    target_szi: str = Form(""),
+    audit_period_start: str = Form(""),
+    audit_period_weeks: str = Form(""),
     db: Session = Depends(get_db),
     user: User = Depends(require_admin),
 ) -> Response:
@@ -6149,7 +6701,17 @@ def admin_orgs_edit_save(
         levels = _get_active_artifact_levels(db)
         return templates.TemplateResponse(
             "admin/org_edit.html",
-            {"request": request, "user": user, "org": org, "error": "Имя организации обязательно", "levels": levels},
+            {
+                "request": request,
+                "user": user,
+                "org": org,
+                "error": "Имя организации обязательно",
+                "levels": levels,
+                "target_uib": (target_uib or "").strip(),
+                "target_szi": (target_szi or "").strip(),
+                "audit_period_start": (audit_period_start or "").strip(),
+                "audit_period_weeks": (int(audit_period_weeks) if (audit_period_weeks or "").strip().isdigit() else None),
+            },
             status_code=400,
         )
     exists = db.query(Organization).filter(Organization.name == name, Organization.id != org.id).one_or_none()
@@ -6157,7 +6719,17 @@ def admin_orgs_edit_save(
         levels = _get_active_artifact_levels(db)
         return templates.TemplateResponse(
             "admin/org_edit.html",
-            {"request": request, "user": user, "org": org, "error": "Организация с таким именем уже существует", "levels": levels},
+            {
+                "request": request,
+                "user": user,
+                "org": org,
+                "error": "Организация с таким именем уже существует",
+                "levels": levels,
+                "target_uib": (target_uib or "").strip(),
+                "target_szi": (target_szi or "").strip(),
+                "audit_period_start": (audit_period_start or "").strip(),
+                "audit_period_weeks": (int(audit_period_weeks) if (audit_period_weeks or "").strip().isdigit() else None),
+            },
             status_code=400,
         )
 
@@ -6165,22 +6737,146 @@ def admin_orgs_edit_save(
         s = (v or "").strip()
         return int(s) if s.isdigit() else None
 
+    def _parse_float_or_none(v: str) -> float | None:
+        s = (v or "").strip()
+        if not s:
+            return None
+        try:
+            return float(s.replace(",", "."))
+        except Exception:
+            return None
+
+    def _parse_date_or_none(v: str) -> date | None:
+        s = (v or "").strip()
+        if not s:
+            return None
+        try:
+            return date.fromisoformat(s)
+        except Exception:
+            return None
+
     artifact_level_id_val = _parse_int_or_none(artifact_level_id)
+    target_uib_val = _parse_float_or_none(target_uib)
+    target_szi_val = _parse_float_or_none(target_szi)
+    audit_start_val = _parse_date_or_none(audit_period_start)
+    audit_weeks_val = _parse_int_or_none(audit_period_weeks)
 
     if artifact_level_id_val is not None and not db.get(ArtifactLevel, artifact_level_id_val):
         levels = _get_active_artifact_levels(db)
         return templates.TemplateResponse(
             "admin/org_edit.html",
-            {"request": request, "user": user, "org": org, "error": "Некорректный уровень", "levels": levels},
+            {
+                "request": request,
+                "user": user,
+                "org": org,
+                "error": "Некорректный уровень",
+                "levels": levels,
+                "target_uib": (target_uib or "").strip(),
+                "target_szi": (target_szi or "").strip(),
+                "audit_period_start": (audit_period_start or "").strip(),
+                "audit_period_weeks": _parse_int_or_none(audit_period_weeks),
+            },
             status_code=400,
         )
+
+    # Validate targets if provided
+    def _validate_target(v: float | None) -> bool:
+        if v is None:
+            return True
+        return 0.0 <= float(v) <= 5.0
+
+    if not _validate_target(target_uib_val) or not _validate_target(target_szi_val):
+        levels = _get_active_artifact_levels(db)
+        return templates.TemplateResponse(
+            "admin/org_edit.html",
+            {
+                "request": request,
+                "user": user,
+                "org": org,
+                "error": "Целевой показатель должен быть числом от 0 до 5",
+                "levels": levels,
+                "target_uib": (target_uib or "").strip(),
+                "target_szi": (target_szi or "").strip(),
+                "audit_period_start": (audit_period_start or "").strip(),
+                "audit_period_weeks": _parse_int_or_none(audit_period_weeks),
+            },
+            status_code=400,
+        )
+
+    # Validate audit period: both fields must be set together, weeks must be 1/2/4.
+    allowed_weeks = {1, 2, 4}
+    if (audit_start_val is None) != (audit_weeks_val is None):
+        levels = _get_active_artifact_levels(db)
+        return templates.TemplateResponse(
+            "admin/org_edit.html",
+            {
+                "request": request,
+                "user": user,
+                "org": org,
+                "error": "Период аудита должен содержать и дату начала, и длительность",
+                "levels": levels,
+                "target_uib": (target_uib or "").strip(),
+                "target_szi": (target_szi or "").strip(),
+                "audit_period_start": (audit_period_start or "").strip(),
+                "audit_period_weeks": audit_weeks_val,
+            },
+            status_code=400,
+        )
+    if audit_weeks_val is not None and audit_weeks_val not in allowed_weeks:
+        levels = _get_active_artifact_levels(db)
+        return templates.TemplateResponse(
+            "admin/org_edit.html",
+            {
+                "request": request,
+                "user": user,
+                "org": org,
+                "error": "Длительность периода аудита должна быть 1, 2 или 4 недели",
+                "levels": levels,
+                "target_uib": (target_uib or "").strip(),
+                "target_szi": (target_szi or "").strip(),
+                "audit_period_start": (audit_period_start or "").strip(),
+                "audit_period_weeks": audit_weeks_val,
+            },
+            status_code=400,
+        )
+
+    def _get_target(sheet_name: str) -> float | None:
+        row = (
+            db.query(OrgIndexKbTarget)
+            .filter(OrgIndexKbTarget.org_id == int(org.id), OrgIndexKbTarget.sheet_name == sheet_name)
+            .one_or_none()
+        )
+        return float(row.target_value) if row else None
+
+    def _set_target(sheet_name: str, v: float | None) -> None:
+        row = (
+            db.query(OrgIndexKbTarget)
+            .filter(OrgIndexKbTarget.org_id == int(org.id), OrgIndexKbTarget.sheet_name == sheet_name)
+            .one_or_none()
+        )
+        if v is None:
+            if row:
+                db.delete(row)
+            return
+        if row:
+            row.target_value = float(v)
+            return
+        db.add(OrgIndexKbTarget(org_id=int(org.id), sheet_name=sheet_name, target_value=float(v)))
 
     before = {
         "name": org.name,
         "artifact_level_id": getattr(org, "artifact_level_id", None),
+        "target_uib": _get_target(UIB_SHEET_NAME),
+        "target_szi": _get_target(SZI_SHEET_NAME),
+        "audit_period_start": (org.audit_period_start.isoformat() if getattr(org, "audit_period_start", None) else None),
+        "audit_period_weeks": (int(org.audit_period_weeks) if getattr(org, "audit_period_weeks", None) else None),
     }
     org.name = name
     org.artifact_level_id = artifact_level_id_val
+    org.audit_period_start = audit_start_val
+    org.audit_period_weeks = audit_weeks_val
+    _set_target(UIB_SHEET_NAME, target_uib_val)
+    _set_target(SZI_SHEET_NAME, target_szi_val)
     write_audit_log(
         db,
         actor=user,
@@ -6192,6 +6888,10 @@ def admin_orgs_edit_save(
         after={
             "name": org.name,
             "artifact_level_id": getattr(org, "artifact_level_id", None),
+            "target_uib": _get_target(UIB_SHEET_NAME) if target_uib_val is None else float(target_uib_val),
+            "target_szi": _get_target(SZI_SHEET_NAME) if target_szi_val is None else float(target_szi_val),
+            "audit_period_start": (audit_start_val.isoformat() if audit_start_val else None),
+            "audit_period_weeks": (int(audit_weeks_val) if audit_weeks_val is not None else None),
         },
         request=request,
     )
