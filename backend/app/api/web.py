@@ -75,7 +75,9 @@ from app.integrations.nextcloud_sync import sync_from_nextcloud
 router = APIRouter()
 templates = Jinja2Templates(directory="app/templates")
 
-DEFAULT_ORG_NAME = "Default"
+# System org is used internally and must be hidden from most UI selectors.
+# Backward compatibility: old DBs may still have "Default".
+SYSTEM_ORG_NAMES = ("РТК", "Default")
 
 
 def _require_chat_access(db: Session, user: User, org_id: int, *, allow_customer: bool) -> Role:
@@ -203,7 +205,7 @@ INDEX_KB_SHEET_TILES: list[str] = [
 
 
 def _filter_out_default_orgs(orgs: list[Organization]) -> list[Organization]:
-    return [o for o in (orgs or []) if (o.name or "").strip() != DEFAULT_ORG_NAME]
+    return [o for o in (orgs or []) if (o.name or "").strip() not in SYSTEM_ORG_NAMES]
 
 def _parse_date_range_bounds_utc(date_from: str | None, date_to: str | None) -> tuple[date | None, date | None, datetime | None, datetime | None, str | None]:
     """
@@ -7245,13 +7247,17 @@ def admin_users_edit_save(
 
 @router.get("/admin/memberships", response_class=HTMLResponse)
 def admin_memberships(request: Request, db: Session = Depends(get_db), user: User = Depends(require_admin)) -> HTMLResponse:
+    def _is_system_org_name(n: str | None) -> bool:
+        # Backward compatibility: old DBs may still have "Default".
+        return (n or "").strip() in ("РТК", "Default")
+
     all_users = db.query(User).order_by(User.login.asc()).all()
     # "Системные" аккаунты (показываем отдельно): admin (is_admin) и служебный Auditor.
     system_users = [u for u in all_users if u.is_admin or (u.login or "").strip().lower() in ("admin", "auditor")]
     users = [u for u in all_users if u not in system_users]
 
-    # Default организация — служебная (нужна системе), но в UI не показываем.
-    orgs = db.query(Organization).filter(Organization.name != "Default").order_by(Organization.name.asc()).all()
+    # Служебная организация (РТК/Default) нужна системе, но в UI не показываем.
+    orgs = db.query(Organization).filter(~Organization.name.in_(("РТК", "Default"))).order_by(Organization.name.asc()).all()
     all_ms = (
         db.query(UserOrgMembership)
         .join(Organization, Organization.id == UserOrgMembership.org_id)
@@ -7260,8 +7266,8 @@ def admin_memberships(request: Request, db: Session = Depends(get_db), user: Use
         .all()
     )
     system_user_ids = {u.id for u in system_users}
-    system_memberships = [m for m in all_ms if (m.org and m.org.name == "Default") or (m.user_id in system_user_ids)]
-    org_memberships = [m for m in all_ms if m not in system_memberships and (m.org and m.org.name != "Default")]
+    system_memberships = [m for m in all_ms if (m.org and _is_system_org_name(getattr(m.org, "name", None))) or (m.user_id in system_user_ids)]
+    org_memberships = [m for m in all_ms if m not in system_memberships and (m.org and not _is_system_org_name(getattr(m.org, "name", None)))]
     role_labels = {"admin": "Администратор", "auditor": "Аудитор", "customer": "Заказчик"}
     return templates.TemplateResponse(
         "admin/memberships.html",
@@ -7289,11 +7295,14 @@ def admin_memberships_create(
     db: Session = Depends(get_db),
     user: User = Depends(require_admin),
 ) -> Response:
+    def _is_system_org_name(n: str | None) -> bool:
+        return (n or "").strip() in ("РТК", "Default")
+
     def _render_error(msg: str, status_code: int = 400) -> HTMLResponse:
         all_users = db.query(User).order_by(User.login.asc()).all()
         system_users = [u for u in all_users if u.is_admin or (u.login or "").strip().lower() in ("admin", "auditor")]
         users = [u for u in all_users if u not in system_users]
-        orgs = db.query(Organization).filter(Organization.name != "Default").order_by(Organization.name.asc()).all()
+        orgs = db.query(Organization).filter(~Organization.name.in_(("РТК", "Default"))).order_by(Organization.name.asc()).all()
         all_ms = (
             db.query(UserOrgMembership)
             .join(Organization, Organization.id == UserOrgMembership.org_id)
@@ -7302,8 +7311,8 @@ def admin_memberships_create(
             .all()
         )
         system_user_ids = {u.id for u in system_users}
-        system_memberships = [m for m in all_ms if (m.org and m.org.name == "Default") or (m.user_id in system_user_ids)]
-        org_memberships = [m for m in all_ms if m not in system_memberships and (m.org and m.org.name != "Default")]
+        system_memberships = [m for m in all_ms if (m.org and _is_system_org_name(getattr(m.org, "name", None))) or (m.user_id in system_user_ids)]
+        org_memberships = [m for m in all_ms if m not in system_memberships and (m.org and not _is_system_org_name(getattr(m.org, "name", None)))]
         role_labels = {"admin": "Администратор", "auditor": "Аудитор", "customer": "Заказчик"}
         return templates.TemplateResponse(
             "admin/memberships.html",
@@ -7327,9 +7336,9 @@ def admin_memberships_create(
     if not org_id:
         return _render_error("Выберите организацию")
 
-    # Не даём назначать роли на служебную Default организацию.
+    # Не даём назначать роли на служебную организацию (РТК/Default).
     org = db.get(Organization, org_id)
-    if org and org.name == "Default":
+    if org and _is_system_org_name(getattr(org, "name", None)):
         return _redirect("/admin/memberships")
     try:
         role_enum = Role(role)

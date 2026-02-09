@@ -26,7 +26,7 @@ services:
       APP_SECRET_KEY: dev-secret-change-me
       ADMIN_LOGIN: admin
       ADMIN_PASSWORD: admin12345
-      ADMIN_FULL_NAME: Default Admin
+      ADMIN_FULL_NAME: РТК Администратор
       MAX_UPLOAD_MB: "50"
       SHARE_PATH: /mnt/share
       # Optional: seed demo files + mixed statuses (Alembic 0016)
